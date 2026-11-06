@@ -1,0 +1,32 @@
+{
+  "name": "minnow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Windows workspace for parallel oh-my-pi agents, with isolated Git worktrees and native terminals.",
+  "author": "hanphanr1",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/hanphanr1/Minnow.git" },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "desktop": "tauri dev",
+    "release": "tauri build --no-bundle"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "svelte": "^5.39.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.0",
+    "@tauri-apps/cli": "^2.8.0",
+    "svelte-check": "^4.3.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.1.0"
+  }
+}

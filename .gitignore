@@ -1,7 +1,8 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/gen/
 _ref/
-.omp-deck/
+.minnow/
 *.log
 .smoke/

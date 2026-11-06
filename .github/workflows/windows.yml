@@ -1,0 +1,42 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm.cmd ci
+      - run: npm.cmd run check
+      - run: cargo check --locked
+        working-directory: src-tauri
+      - run: cargo test --lib --locked
+        working-directory: src-tauri
+      - run: npm.cmd run release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Minnow-windows-x64
+          path: src-tauri/target/release/minnow.exe
+          if-no-files-found: error

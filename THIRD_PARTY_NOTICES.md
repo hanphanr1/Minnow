@@ -2,7 +2,7 @@
 
 ## Orca reference
 
-Architecture and interaction reference: [stablyai/orca](https://github.com/stablyai/orca), revision `e507dd7732139e302f6adaa2917d8e0aee5b1362`, cloned into `_ref/orca` (excluded from this repository). omp-deck is an independent Rust/Svelte implementation, not an Electron fork. No Orca source or visual assets are copied into the application. The reference license is retained here for attribution and any future ports; any future copied substantial portion must retain this notice.
+Architecture and interaction reference: [stablyai/orca](https://github.com/stablyai/orca), revision `e507dd7732139e302f6adaa2917d8e0aee5b1362`, cloned into `_ref/orca` (excluded from this repository). Minnow is an independent Rust/Svelte implementation, not an Electron fork. No Orca source or visual assets are copied into the application. The reference license is retained here for attribution and any future ports; any future copied substantial portion must retain this notice.
 
 ```text
 MIT License
