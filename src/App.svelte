@@ -9,6 +9,7 @@
   import WorkspacePalette from './ui/WorkspacePalette.svelte';
   import RightSidebar from './ui/RightSidebar.svelte';
   import ProjectAdmission from './ui/ProjectAdmission.svelte';
+  import QuickOpen from './ui/QuickOpen.svelte';
   import WindowControls from './ui/WindowControls.svelte';
   import { loadPreferences, preferenceKey, type UiPreferences } from './ui/preferences';
   import type { Project, Settings, TerminalKind, TerminalSession, Worker } from './types';
@@ -37,6 +38,7 @@
   let createOpen = $state(false);
   let paletteOpen = $state(false);
   let projectOpen = $state(false);
+  let quickOpenOpen = $state(false);
   let confirmDialog = $state<HTMLDialogElement>();
   let confirm = $state<{action:'merge'|'delete';worker:Worker;busy:boolean;error:string|null}|null>(null);
   type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void };
@@ -288,7 +290,7 @@
     const key = event.key.toLowerCase();
     if (event.ctrlKey && !event.altKey) {
       if (key === 'n') { event.preventDefault(); createOpen = true; return; }
-      if (key === 'p' && !event.shiftKey) { event.preventDefault(); setPanel('search'); return; }
+      if (key === 'p' && !event.shiftKey) { event.preventDefault(); if (worker) quickOpenOpen = true; return; }
       if (event.shiftKey && ['b','m','o'].includes(key)) { event.preventDefault(); feature(key === 'b' ? 'Browser' : 'Markdown'); return; }
       if (event.shiftKey && key === 'backspace' && worker) { event.preventDefault(); void action('delete',worker); return; }
       if (key === 'b' && !event.shiftKey) { event.preventDefault(); toggleSidebar(); return; }
@@ -399,6 +401,7 @@
 <WindowControls onError={message => notify(message,true)} onBeforeClose={leaveFile}/>
 {#if createOpen}<CreateWorkspace {projects} {selectedProjectId} defaultCount={settings.default_worker_count} onCreate={create} onAddProject={() => { createOpen = false; projectOpen = true; }} onClose={() => { createOpen = false; }}/>{/if}
 {#if paletteOpen}<WorkspacePalette {projects} {workers} onSelect={select} onCreate={() => { paletteOpen = false; createOpen = true; }} onClose={() => { paletteOpen = false; }}/>{/if}
+{#if quickOpenOpen && worker}<QuickOpen {worker} onOpen={(path,line) => { void openFile(path,line); }} onClose={() => { quickOpenOpen = false; }}/>{/if}
 {#if projectOpen}<ProjectAdmission repoCount={projects.length} onAdded={async value => { projects = [...projects.filter(p => p.id !== value.id),value]; await select(value.id); }} onClose={() => { projectOpen = false; }}/>{/if}
 <dialog bind:this={confirmDialog} class="mn-dialog" aria-labelledby="confirm-title" oncancel={event => { if (confirm?.busy) event.preventDefault(); else confirm = null; }} onclose={() => { if (!confirm?.busy) confirm = null; }}>
   {#if confirm}<h2 id="confirm-title">{confirm.action === 'delete' ? 'Delete workspace' : 'Merge workspace'}</h2><p class="mt-3">{confirm.action === 'delete' ? `Delete ${confirm.worker.name} and its worktree? Dirty files and unmerged changes prevent deletion. Session history is retained.` : `Merge ${confirm.worker.branch} into ${confirm.worker.base_ref}? Stop the worker and commit its changes first. Both trees must be clean.`}</p>{#if confirm.error}<p class="mn-error mt-3" role="alert">{confirm.error}</p>{/if}<div class="mt-6 flex justify-end gap-2"><button class="mn-button" disabled={confirm.busy} onclick={() => { confirm = null; }}>Cancel</button><button class="mn-button" class:danger={confirm.action === 'delete'} disabled={confirm.busy} onclick={confirmAction}>{confirm.busy ? 'Working…' : confirm.action === 'delete' ? 'Delete workspace' : 'Merge'}</button></div>{/if}
