@@ -7,7 +7,7 @@
 - [x] Preserve the supplied icon, generate Tauri assets, and verify native/executable icons.
 - [x] Configure hanphanr1 authorship, the Minnow GitHub remote, and attribution.
 
-## Orca interface replacement (current priority)
+## Orca shell milestone (published at `0997e90`)
 - [x] Study renderer components, spacing, typography, theme tokens, icons, states, and shortcuts.
 - [x] Map screens/components to source paths in UI_PARITY.md.
 - [x] Port Geist/Nerd fonts, light/dark tokens, Lucide geometry, and Windows chrome with license notices.
@@ -17,10 +17,43 @@
 - [x] Preserve visible-only terminals, native PTY leases, 2 MiB rings, and 64 KiB acknowledgement windows.
 - [x] Implement appearance/terminal preferences and searchable settings/shortcut navigation.
 - [x] Render actual Git patches and preserve real restart/stop/editor/merge/delete callbacks.
-- [x] Keep excluded service-backed features as labelled shell-only pages.
-- [x] Keep Rust and `src/api.ts` contracts unchanged; exclude the pre-existing ConPTY fix from UI commits.
+- [x] Label service-backed placeholders honestly in the initial shell milestone.
+- [x] Preserve the PTY buffering/acknowledgement contracts in the shell milestone.
 - [x] Finish desktop interaction proof and 16 source/Minnow comparisons in `docs/parity/`.
 - [x] Commit the verified screen milestones and record their revisions in UI_PARITY.md.
+
+## Full parity continuation
+
+The shell milestone is not complete Orca parity. The requested continuation includes the missing functions below; a screenshot or unavailable page does not complete a feature.
+
+- [x] Push the existing `main` milestone to `https://github.com/hanphanr1/Minnow.git`.
+- [ ] Native folder selection acceptance: opening/cancel works; successful selection still needs a manual pass.
+- [x] Real local clone and Git project creation through the native app.
+- [x] Lazy file explorer, content search and real UTF-8 editing with revision-checked saves.
+- [x] Real staged/unstaged/untracked Git status, staging, commits and bounded history.
+- [ ] Multiple independent terminals in the same worktree, including split cwd inheritance.
+- [x] Native coalesced file-change invalidation for the visible workspace and Git index.
+- [ ] Quick open, file operations and remaining explorer interactions.
+- [ ] Source-matched persistent Explorer Names/Contents strip, global filename filtering and Git decorations.
+- [ ] File and diff tabs inside workspace groups, with independent dirty-document ownership, rather than a whole-center replacement.
+- [ ] Branch selection, nested workspaces, non-Git folder projects and attached worktrees.
+- [ ] Source-control conflicts/discard, history pagination, diff comments and split-open behavior.
+- [ ] Editable keyboard shortcuts with one runtime binding registry and conflict detection.
+- [ ] Complete terminal/appearance/general settings and theme import/export.
+- [ ] Notification preferences, real activity history and agent attention routing.
+- [ ] Local quick commands, workspace space and floating workspaces.
+- [ ] Agent session history/search, local skills and usage inspection.
+- [ ] Tasks and integrations, with actual provider authentication and data.
+- [ ] Durable automations with real worker dispatch and run history.
+- [ ] Native chat/agent adapters and provider account management.
+- [ ] On-demand browser pane and its navigation/session settings without Electron.
+- [ ] SSH/server connections, ports and remote session lifecycle.
+- [ ] Plugins, artifacts and shared skills backed by actual runtimes/services.
+- [ ] Mobile/computer-use/voice capabilities with real device/runtime prerequisites.
+- [ ] Setup, diagnostics, project-scoped settings and remaining reference settings.
+- [ ] Recompare each implemented screen against Orca; record actual remaining mismatches.
+
+Source entry points and dependency boundaries are tracked in UI_PARITY.md. External services, OAuth registrations, device access and downloaded runtimes are prerequisites, not behavior that can be replaced by fabricated local success.
 
 ## Existing native engine
 SQLite project/session/settings storage, worktrees, ConPTY, bounded output, status detection, notifications, worker actions, and saved-session relaunch remain the existing Rust implementation. UI work does not replace or re-certify that engine. `src-tauri/src/pty.rs` contains an earlier, separate startup-handshake fix.

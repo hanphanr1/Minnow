@@ -3,7 +3,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { isDesktop } from '../api';
 
-  let { onError }: { onError: (message: string) => void } = $props();
+  let { onError, onBeforeClose }: { onError: (message: string) => void; onBeforeClose: () => Promise<boolean> } = $props();
   let maximized = $state(false);
 
   async function operate(action: 'minimize' | 'maximize' | 'close') {
@@ -24,13 +24,28 @@
     if (!isDesktop()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    let unlistenClose: (() => void) | undefined;
+    let closeApproved = false;
+    let decidingClose = false;
     const window = getCurrentWindow();
     void window.isMaximized().then(value => { if (!disposed) maximized = value; }).catch(error => onError(String(error)));
     void window.onResized(async () => {
       try { const value = await window.isMaximized(); if (!disposed) maximized = value; }
       catch (error) { if (!disposed) onError(String(error)); }
     }).then(remove => { if (disposed) remove(); else unlisten = remove; }).catch(error => onError(String(error)));
-    return () => { disposed = true; unlisten?.(); };
+    void window.onCloseRequested(event => {
+      if (closeApproved) return;
+      event.preventDefault();
+      if (decidingClose) return;
+      decidingClose = true;
+      void onBeforeClose().then(async allowed => {
+        if (!allowed || disposed) return;
+        closeApproved = true;
+        try { await window.close(); }
+        catch (error) { closeApproved = false; onError(String(error)); }
+      }).catch(error => onError(String(error))).finally(() => { decidingClose = false; });
+    }).then(remove => { if (disposed) remove(); else unlistenClose = remove; }).catch(error => onError(String(error)));
+    return () => { disposed = true; unlisten?.(); unlistenClose?.(); };
   });
 </script>
 

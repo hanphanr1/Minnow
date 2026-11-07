@@ -8,7 +8,7 @@ Built with **Tauri 2, Rust, Svelte 5, and ConPTY**. No Electron. No UI component
 
 ## What it does
 
-- Add local Git projects and launch named workers in isolated branches.
+- Add projects with the native folder picker, clone a repository, or create a new Git project.
 - Type directly into any worker's real omp terminal, rendered by xterm.js with WebGL.
 - See activity-based running, idle, waiting-for-input, and exited states, with Windows notifications on idle and exit.
 - Restart or stop workers, open their worktrees in VS Code, inspect diffs, and merge or remove worktrees with Git safety checks.
@@ -16,6 +16,8 @@ Built with **Tauri 2, Rust, Svelte 5, and ConPTY**. No Electron. No UI component
 - Configure the omp executable and default worker count. Keep your existing omp providers, authentication, and tools.
 - Use the Orca-style workspace shell, workspace search, tab menus, resizable panes, and Windows keyboard shortcuts.
 - Switch between dark, light, and system themes; tune terminal typography, cursor, and pane titles.
+- Browse workspace folders lazily, search file contents, and edit UTF-8 files with CodeMirror. Saves check the observed file revision and preserve Windows line endings.
+- Review staged, unstaged and untracked changes; stage/unstage individual files or sections, commit staged changes and inspect actual commit history.
 
 ![Minnow workspace](docs/parity/minnow-terminal-split-dark.png)
 
@@ -83,10 +85,10 @@ The Tauri configuration lists the generated PNG, ICO, and ICNS assets. Windows e
 
 ## Workflow
 
-1. **Add a project.** Enter the path of a local Git repository with an initial commit and a checked-out branch. That branch becomes the project's merge target.
+1. **Add a project.** Browse to a local Git repository, enter its path, clone a repository into a parent folder, or create a new project. Existing repositories need an initial commit and checked-out branch. New projects use your Git identity for their initial commit; no identity or signing configuration is invented.
 2. **Create workers.** Choose a name and count. Worktrees live at `<repo>/.minnow/worktrees/<name>`; each worker has a dedicated session directory at `<repo>/.minnow/sessions/<id>`.
 3. **Work in parallel.** Switch tabs with Alt+1…9 or Ctrl+PageUp/PageDown. Split right with Ctrl+Shift+D or down with Alt+Shift+D. Each new terminal creates another worker/worktree. Hidden terminals keep running but release their browser-side terminal resources.
-4. **Review and merge.** Commit changes in the worker's worktree, stop it, inspect the diff, then merge. Both trees must be clean and the base checkout must be on the captured target branch. Nothing is automatically staged or committed.
+4. **Review and merge.** Use Explorer/Search to open and edit real files. Source Control separates staged, unstaged and untracked changes; commits include only the index. Stop the worker before merging. Both trees must be clean and the base checkout must be on the captured target branch.
 5. **Remove finished workers.** Deletion refuses dirty worktrees, including ignored files, and branches not merged into the base. Session history is retained.
 
 VS Code's `code` launcher must be on PATH. Diffs cover committed and working-tree changes relative to the worker's creation commit, including untracked files. Git output and displayed diffs are bounded to 2 MiB; inspect larger changes directly with Git.
@@ -100,6 +102,8 @@ Closing Minnow terminates its owned worker process trees and records which worke
 - Visible output has a **64 KiB acknowledgement window**. A slow terminal renderer cannot accumulate an unlimited IPC queue.
 - Only visible terminals allocate xterm and WebGL resources. xterm scrollback is bounded to 500 lines.
 - Process exit uses a blocking wait. A one-second native supervisor checks inactivity.
+- Explorer lists one directory at a time, capped at 1,000 entries. UTF-8 file reads, saves and displayed Git output are bounded to 2 MiB. Search caps hits at 500, candidate files at 20,000 and scanned text at 32 MiB; truncated results are labelled.
+- One leased filesystem observer follows the visible workspace and its Git index. Change events are coalesced; the UI does not poll repository files or Git status.
 - omp launches with `--motion none --spinner-interval 0 --no-title` to avoid animation and background title generation.
 
 Tauri still uses WebView2 renderer, GPU, and utility processes. Four omp workers also have their own memory costs; measuring only `minnow.exe` would hide most of the total.
@@ -118,7 +122,7 @@ The script records the full descendant process tree, including WebView2 and omp.
 
 ## State and limitations
 
-- SQLite stores projects, worker identities, merge bases, desired-running state, and settings in the per-user local app-data directory for `com.minnow.app`. `MINNOW_DATA_DIR` selects a separate state directory for isolated runs. One process owns a state directory at a time.
+- SQLite stores projects, worker identities, merge bases, desired-running state and settings in the per-user local app-data directory for `com.minnow.app`. `MINNOW_DATA_DIR` isolates both SQLite and the WebView2 browser profile. One process owns a state directory at a time.
 - `.minnow/` is added to the repository's local Git exclude, not its tracked `.gitignore`.
 - Status is an observation, not a model completion signal: running means recent PTY activity; idle means at least three seconds of silence; waiting-for-input means a recognized prompt followed by silence; exited comes from the process wait result. A long silent request can appear idle, and unfamiliar prompts may not be recognized.
 - Windows can suppress notification banners through Focus Assist or notification preferences. The unpackaged executable uses the notification crate's Windows PowerShell toast identity, with Minnow in the title. Notification clicks do not select a worker.
@@ -126,9 +130,10 @@ The script records the full descendant process tree, including WebView2 and omp.
 - A conflicting merge is reported and the merge started by Minnow is aborted; the worker branch is retained. Resolve the branch conflict with Git before retrying. No forced reset or worktree removal is used.
 - This release targets local Windows repositories and the native omp executable. It does not include remote hosts, WSL orchestration, multi-vendor agent launchers, or Orca's dispatch graph.
 - Orca's browser, native chat, mobile, remote hosts, integrations, and other service-backed pages are labelled shell-only placeholders. No Electron or Orca service runs inside Minnow.
-- Explorer has no file-tree backend; Source Control displays real bounded Git patches. Staging, history, provider data, and full-file editing are not implemented.
-- Project addition accepts a local repository path rather than opening a native folder picker. Workspace creation supports names and counts; provider issue/PR and arbitrary branch selection are unavailable.
+- Explorer/search/editing and local Git staging/commit/history now have real native APIs. File editing is limited to UTF-8 text; binary/oversized files produce an error. Conflicting external edits are not silently overwritten. Renaming/deleting files, Git discard/conflict-resolution UI and history paging remain incomplete.
+- Native Browse folder, clone and create-project flows are implemented. Plain non-Git folders, provider issue/PR creation and arbitrary workspace base-branch selection remain incomplete. Clone uses your configured Git credentials; no token is embedded.
 - Shortcut settings show Orca's Windows defaults, including excluded commands. Supported workspace/terminal bindings work; custom rebinding is unavailable.
+- The published shell milestone is not full Orca parity. [UI_PARITY.md](UI_PARITY.md) tracks missing feature families separately from screenshot coverage; unavailable pages do not count as implemented features.
 - Local workspace state and session files are not encrypted by Minnow. Provider credentials remain managed by omp.
 
 ## Architecture and reference

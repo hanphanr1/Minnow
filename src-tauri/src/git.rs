@@ -21,11 +21,11 @@ const EXCLUDE_PATTERN: &str = "/.minnow/";
 const MAX_GIT_OUTPUT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug)]
-struct GitOutput {
-    ok: bool,
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(crate) struct GitOutput {
+    pub(crate) ok: bool,
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Inspects a local repository path and builds the project record for it.
@@ -592,7 +592,7 @@ fn new_git() -> Command {
     command
 }
 
-fn git_at(repo: Option<&Path>, args: &[&str]) -> Result<GitOutput, String> {
+pub(crate) fn git_at(repo: Option<&Path>, args: &[&str]) -> Result<GitOutput, String> {
     let mut command = new_git();
     command.arg("-c").arg("core.quotepath=false");
     if let Some(repo) = repo {
@@ -632,7 +632,7 @@ fn git_at(repo: Option<&Path>, args: &[&str]) -> Result<GitOutput, String> {
     })
 }
 
-fn git_ok(repo: Option<&Path>, args: &[&str], action: &str) -> Result<String, String> {
+pub(crate) fn git_ok(repo: Option<&Path>, args: &[&str], action: &str) -> Result<String, String> {
     let output = git_at(repo, args)?;
     if !output.ok {
         return Err(failure_message(action, &output));
@@ -660,7 +660,7 @@ fn failure_message(action: &str, output: &GitOutput) -> String {
 /* path helpers                                                              */
 /* ------------------------------------------------------------------------- */
 
-fn display_path(path: &Path) -> PathBuf {
+pub(crate) fn display_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let text = path.to_string_lossy();
@@ -698,7 +698,7 @@ fn canonical_existing(path: &Path, label: &str) -> Result<PathBuf, String> {
     Ok(display_path(&canonical))
 }
 
-fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf, String> {
     let canonical = canonical_existing(path, label)?;
     if !canonical.is_dir() {
         return Err(format!("{label} {} is not a directory", canonical.display()));

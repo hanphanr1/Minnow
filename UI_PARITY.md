@@ -1,17 +1,46 @@
 # Orca UI parity
 
-Reference: Orca 1.4.214, commit `e507dd7732139e302f6adaa2917d8e0aee5b1362` in `_ref/orca`. Paths in the Source column are relative to `_ref/orca/src/renderer/src` unless stated otherwise. Checked rows were exercised and visually reviewed in the native Minnow desktop. They do not imply implementation of Orca's excluded services.
+Reference: Orca 1.4.214, commit `e507dd7732139e302f6adaa2917d8e0aee5b1362` in `_ref/orca`. Paths in the Source column are relative to `_ref/orca/src/renderer/src` unless stated otherwise. Checked rows record the shell milestone's native visual/interaction exercises, not complete feature parity. The user reviewed that milestone and requested further visual and functional work.
 
 ## Contract
 
-- Preserve the existing Rust backend, SQLite schema, IPC methods, 2 MiB terminal ring, 64 KiB acknowledgement window, and terminal subscription leases.
+- Preserve the PTY engine's 2 MiB terminal ring, 64 KiB acknowledgement window and subscription leases. Missing native features may add scoped APIs; the earlier frontend-only milestone did not provide them.
 - Replace the custom Minnow layout with the Orca shell. Retain the Minnow product name and supplied app icon.
 - Copy Orca theme tokens, Geist and Nerd Symbols fonts, and Lucide 0.577.0 icon geometry under their original licenses. See `THIRD_PARTY_NOTICES.md`.
-- Browser, mobile/emulator, remote hosts, native chat, external integrations and other excluded heavy features retain their shell entry points with explicit unavailable-state content. They do not start services or imitate successful actions.
+- Browser, mobile/emulator, remote hosts, native chat, external integrations and other service-backed features remain incomplete until connected to their actual runtimes. Their existing unavailable-state pages are not completed parity.
 - Each backend worker owns one worktree and one PTY. Frontend tab names, pins, ordering, split groups and widths are presentation state. Creating another terminal launches another worker through the existing API; it does not claim to create a second PTY inside the same worktree.
-- Source control reads the real unified diff returned by `diff_worker`. It does not invent file contents, stages, commit history or provider data.
+- Source Control uses native Git status, index operations, commits, bounded history and per-file diffs. File contents come from root-scoped native reads; no file, index or provider data is invented.
 
 Design direction: faithful Orca desktop port. ENERGY 1 / RHYTHM 1 / MOTION 1. Geometry, typography, iconography and state colors follow the reference, rather than a new Minnow design system.
+
+## Functional coverage audit
+
+Baseline: published `0997e90`. This matrix records what that milestone omitted, separately from its screenshot checklist. Native project admission, files/search/editing and Git operations now have the smoke evidence below; the other feature families remain open.
+
+| Feature family | Baseline state | Reference entry points and prerequisites |
+|---|---|---|
+| Project folder picker, clone, create | Missing; path entry only | `components/sidebar/project-admission/dialog/AddRepoStartSteps.tsx`, `AddRepoCloneStep.tsx`, `AddRepoCreateStep.tsx`; native handlers `_ref/orca/src/main/ipc/repos/` |
+| Explorer, text search, file editor | Missing | `components/right-sidebar/file-explorer/`, `components/editor/`; `_ref/orca/src/main/ipc/filesystem/` |
+| Git status/stage/commit/history | Diff-only shell | `components/right-sidebar/source-control/`, `_ref/orca/src/main/git/source-control/` |
+| Terminal/worktree ownership | Different: a split creates a new worktree | `components/terminal-pane/terminal-pane-split-with-inherited-cwd.ts`, `_ref/orca/src/preload/api/pty-api.ts`; Orca has multiple PTYs per worktree |
+| Explorer watches/operations, quick open | Missing | `file-explorer/watching/useFileExplorerWatch.ts`, `selection/useFileExplorerKeys.ts`, `_ref/orca/src/main/ipc/filesystem/filesystem-list-files.ts` |
+| Folder projects, branch selection, nested/attached workspaces | Missing | `_ref/orca/src/main/ipc/repos/folder-workspace-handlers.ts`, `base-ref-query-handlers.ts`, `components/right-sidebar/FolderWorkspaceWorktreesPanel.tsx` |
+| Source-control conflicts, discard, history paging, notes | Missing | `source-control/listing/`, `notes/`, `sync/use-git-history.ts`, `_ref/orca/src/main/git/source-control/discard-changes.ts` |
+| Shortcut recording/rebinding | Read-only inventory | `components/settings/shortcuts/`, `_ref/orca/src/shared/keybindings/`, `_ref/orca/src/main/keybindings/` |
+| General, appearance and terminal settings | Partial | `components/settings/general/`, `appearance/`, `terminal/`; several current controls remain disabled |
+| Notification settings and activity | Native idle/exit toast only | `components/settings/notifications/`, `components/activity/`, `attention/`; true agent-turn semantics require runtime signals |
+| Quick commands, workspace space, floating workspace | Missing, local-capable | `components/settings/quick-commands/`, `components/workspace-space/`, `components/settings/floating-workspaces/` |
+| Session history/search, local skills, local usage | Missing | `_ref/orca/src/main/ai-vault-search/`, `main/skills/discovery.ts`, `main/usage/`; inspect only user-authorized session/skill locations |
+| Tasks and integrations | Unavailable shell | `components/task-page/`, `components/settings/integrations/`; real provider OAuth tokens/API access |
+| Automations | Unavailable shell | `components/automations/`, `_ref/orca/src/main/automations/`; durable scheduler and real agent dispatch |
+| Native chat, agents and provider accounts | Unavailable shell | `components/native-chat/`, `components/settings/agents/`, `accounts/`; CLI/session adapters and actual account lifecycle |
+| Browser | Unavailable shell | `components/browser-pane/`; source Electron guest model must be replaced by on-demand WebView2 embedding |
+| Remote hosts/servers and ports | Unavailable shell | `components/settings/ssh/`, `runtime-environments/`, `_ref/orca/src/main/ssh/`, `main/ports/`; real transports and credentials |
+| Plugins, artifacts and shared skills | Unavailable shell | `components/plugins/`, `artifacts/`, `skills/`; plugin runtime and actual sharing/catalog services |
+| Mobile, computer use and voice | Unavailable shell | `components/mobile/`, `components/settings/computer-use/`, `voice/`; devices/native adapters/models and explicit user setup where necessary |
+| Setup, diagnostics, project settings, remaining settings | Missing or shell-only | `components/settings/setup-guide/`, `privacy/`, `advanced/`, `experimental/`, `hooks/settings-navigation-remote-sections.ts` |
+
+The baseline also differs in activity-bar item count/meaning, adjustable bar placement and sidebar width clamps. Orca's Agents tab is a session vault, not the worktree list Minnow currently places there. These remain parity gaps, not alternative designs to declare complete.
 
 ## Main-screen checklist
 
@@ -69,7 +98,7 @@ Navigation sources: `hooks/useSettingsNavigationMetadata.ts`, `lib/settings-navi
 | SSH, servers, mobile, mobile emulator, computer use, developer permissions | `settings-navigation-remote-sections.ts`, respective settings folders | Shell-only; no remote connection, device operation or permission changes |
 | Privacy, advanced, developer, experimental, plugins, stats, Orca account, Linear, setup guide, project settings | `settings-navigation-types.ts`, `components/settings/` | Navigation/heading parity with explicit unsupported content |
 | Tasks, Activity, Automations, Workspace Space, Skills, Artifacts, Mobile | `components/task-page/`, `activity/`, `automations/`, `workspace-space/`, `skills/`, `artifacts/`, `mobile/` | Main-shell placeholder pages; no fabricated tasks/accounts/metrics |
-| Explorer, Search, Vault, Workspaces, PR Checks, Source Control, Checks, Ports, plugin panels | `components/right-sidebar/`, `_ref/orca/src/shared/ui-chrome-types.ts:98-108` | Activity-bar shell; real unified diff where backend supports it; explicit unavailable states otherwise |
+| Explorer, Search, Vault, Workspaces, PR Checks, Source Control, Checks, Ports, plugin panels | `components/right-sidebar/`, `_ref/orca/src/shared/ui-chrome-types.ts:98-108` | Real Explorer/Search and local Git operations; Vault/Checks/Ports/plugin services remain incomplete |
 
 Settings layout: 280 px navigation sidebar, source group ordering, row controls, source-width content bands. Appearance uses the original three accordions; Shortcuts uses the original filter rail/list layout. Menu/dialog recipes come from `components/ui/dialog.tsx`, `dropdown-menu.tsx`, `context-menu.tsx`, `command.tsx`.
 
@@ -81,7 +110,7 @@ Source: `_ref/orca/src/shared/keybindings/definitions-core-{1,2,3,4}.ts`. Ctrl i
 - [x] Ctrl+N / Ctrl+Shift+N: create workspace.
 - [x] Ctrl+Shift+Up / Down, Ctrl+1…9: select workspace.
 - [x] Ctrl+B / Ctrl+L: toggle left/right sidebar.
-- [x] Ctrl+Shift+E / F / G: explorer/search/source control; unsupported file search is explicitly labelled.
+- [x] Ctrl+Shift+E / F / G: real explorer/content search/source control.
 - [x] Ctrl+Shift+0: focus workspace list; Ctrl+Shift+H: collapse/expand projects.
 - [x] Ctrl+Alt+Left / Right: selection history.
 - [x] Ctrl+T: new terminal; Ctrl+W: close focused pane (or a single-pane tab); Ctrl+Shift+T: reopen.
@@ -133,16 +162,16 @@ Verified interactions include local project addition and inaccessible-path feedb
 
 - Branding is Minnow. One backend worker still owns one worktree and one PTY; another terminal/split creates another worker. Orca can have several terminals in the same worktree.
 - The composer supports local names/counts and fixed OMP launch. Provider/issue/branch-selection controls are disabled rather than pretending to work.
-- Project addition accepts a repository path. Native folder selection, clone/create-project services, and remote hosts are not added.
-- Explorer/file search and service-backed categories are explicit unavailable states. Tasks and Mobile comparisons establish the shared frame, not the excluded page content.
-- Source Control uses real bounded patches. Staging, commits, PRs and history are labelled unavailable. Diff views render known patch lines only, without importing Monaco or inventing full file contents.
+- Native folder selection, local clone and Git project creation are added; non-Git folder projects, nested import and remote hosts remain incomplete.
+- Explorer/content search and UTF-8 editing now use native APIs. Tasks and Mobile comparisons still establish only the shared frame, not those features' content.
+- Source Control supports real status, staging, unstaging, commits, bounded history and staged/unstaged per-file diffs. PRs, conflicts/discard UI, history paging and diff comments remain incomplete. CodeMirror is loaded only for file editing; diff views continue to render actual patches.
 - Shortcut settings are a read-only inventory of 96 defaults in the pinned source. The newer installed reference exposes 139; that version difference is visible in the comparison.
 - Narrow settings windows stack navigation above content; the normal reference-size desktop retains the source sidebar/card geometry.
 
 ## Native verification
 
 - Frontend checks: zero TypeScript/Svelte errors and warnings. Production builds and native release builds succeeded.
-- `cargo check --locked` passed. No Rust or `src/api.ts` changes were made for this UI port. The earlier uncommitted ConPTY handshake fix in `src-tauri/src/pty.rs` is excluded from frontend commits.
+- Shell milestone: `cargo check --locked` passed with Rust and `src/api.ts` otherwise unchanged. The separate ConPTY startup-handshake fix was subsequently committed as `f122314`; native file/Git additions are documented below rather than mislabelled frontend-only.
 - Cold release proof caught and fixed a stale tab-list update: closing/reopening now restores the visible terminal and restarts its actual worker. Pane close stops only the focused worker; the worktree remains.
 - Live smoke caught and fixed zero-width flex terminals, premature terminal autofocus during menus, teardown identity errors, xterm 5's disposed-viewport callback, and shell shortcuts leaking into PTY input. Compatible xterm 6/addons replace the old renderer packages.
 - Only visible panes mount xterm. Switching hidden tabs disposes their browser-side instances; Rust retains output. The ring/lease/64 KiB acknowledgement API is unchanged.
@@ -152,3 +181,25 @@ Verified interactions include local project addition and inaccessible-path feedb
 - Verification gate: source/attribution PASS; real-data and labelled-exclusion checks PASS; desktop geometry/themes/keyboard checks PASS; native runtime/build evidence PASS.
 
 The original four-real-omp-worker RAM measurement remains paused at the user's direction. No RAM target or performance comparison is claimed by these screenshots.
+
+## Native local-feature continuation
+
+Source-shaped components: `ProjectAdmission.svelte`, `ExplorerPane.svelte`, `SourceControlPane.svelte`, `FileEditor.svelte`; native implementations: `projects.rs`, `workspace.rs`, `workspace_watch.rs`. APIs are in `workspace-api.ts`, with leased watcher ownership in `workspace-watch.ts`.
+
+- PASS, real-data/functional: native desktop admitted an existing repository, initialized a project and cloned it locally; created a worker with an actual ConPTY fixture; lazy-expanded directories; read, edited and saved actual files; searched real text and jumped to line 2; staged/unstaged a file; committed the staged file while another remained untracked. The observed commit was `1b63ef510963ce477207b0e18f7212d13da4a045` in the isolated fixture repository, not the application repository.
+- PASS, data-loss checks: stale revision saves preserved both the external file and the dirty document; cancelling close/reload preserved edits; explicit discard reloaded; same-path search navigation retained unsaved content; CRLF save preserved the actual `\r\n` bytes. Native window Close was intercepted and Cancel kept the edited document/window alive.
+- PASS, live invalidation: creating files on disk refreshed the visible tree without a manual refresh. One watcher lease follows the visible workspace and Git index, coalesces events at 500 ms and does not emit to minimized windows. Git status disables optional index writes to avoid watcher feedback.
+- PASS, bounded data: one-level directory reads cap entries at 1,000; file reads/saves cap UTF-8 text at 2 MiB; literal search caps at 500 matches, 20,000 candidate files and 32 MiB scanned text. In-process mutation serialization and revision checks prevent concurrent app saves from silently overwriting one another; they are not a cross-process filesystem transaction.
+- PASS, checked build/runtime: reviewed frontend check had zero errors/warnings; production build and native build succeeded; 27 Windows-native tests passed. Cold native proof after review exercised bounded search and the dirty-file guard on Ctrl+Shift+Backspace without page errors. Earlier untracked-file diff proof rendered actual lines.
+- PASS, rendered themes: genuine native dark/light editor captures, no horizontal document overflow at the reference capture size. Measured editor/gutter pairings: `#F0F0F0/#1E1E1E` 14.63:1, `#ACACAC/#1E1E1E` 7.34:1. Existing source geometry, font tokens and low-motion direction were retained.
+
+Native captures (1440×900): [Explorer/editor dark](docs/parity/minnow-functional-explorer-editor-dark.png), [Search to line](docs/parity/minnow-functional-search-dark.png), [Source Control and real history](docs/parity/minnow-functional-source-control-dark.png), [Editor light](docs/parity/minnow-functional-editor-light.png), [Native-close guard](docs/parity/minnow-functional-close-guard-dark.png). These are additional Minnow runtime evidence, not new side-by-side Orca parity claims.
+
+Windows folder dialog opening and cancellation were exercised. Automated synthetic selection did not change the dialog's internal folder model, so successful native picker selection is not claimed; typed-path admission and actual create/clone were exercised. Native dialogs need a manual selection pass before that acceptance row can be checked.
+
+Found and corrected during this continuation: same-file prop updates reloaded and lost dirty text; CodeMirror default serialization converted CRLF; Git `check-ignore` rejects `--literal-pathspecs`; native Close needed the same dirty-document guard as in-app navigation. Tailwind now scans only `src/` explicitly, rather than accidentally traversing reference/build trees if ignore rules change. Tauri 2.12's config conversion omitted `dataDirectory`; isolated windows use its builder setter so their WebView2 profile no longer collides with the user's running release.
+
+The additional installed-Orca capture [Editor and Explorer](docs/parity/orca-functional-editor-dark.png) exposes further gaps: its editor is a tab within the selected group alongside live terminal groups, not a whole-center replacement; Explorer has persistent Names/Contents switching and a Find files field; it also decorates Git state and offers more file actions. These are not claimed matched by the first native file milestone. The pinned source confirms `FileExplorerQueryStrip.tsx`, `FileExplorerNameFilter.tsx` and `FileExplorerToolbar.tsx`.
+
+Review corrections: staging a renamed destination no longer stages unrelated content recreated at its old index pathname; untracked symlink diffs show the link value/mode instead of reading target contents; ignore-file parsing has independent byte/rule budgets, including nested and global/exclude rules. Saves recheck revision/type/path immediately before replacement, with the remaining cross-process rename race still explicitly not claimed atomic. Native close acceptance requires `core:window:allow-destroy`, because Tauri's `onCloseRequested` wrapper itself calls `destroy()` after an unprevented callback. Ctrl+Shift+Backspace now goes through the same file-leave guard as the normal delete action; an independently removed workspace retains the draft with an explicit recovery warning rather than silently dropping it.
+

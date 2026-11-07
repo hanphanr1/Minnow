@@ -1,5 +1,5 @@
 /* Ported from Orca e507dd7, MIT. See THIRD_PARTY_NOTICES.md. */
-@import 'tailwindcss';
+@import 'tailwindcss' source(none);
 @source './';
 @custom-variant dark (&:where(.dark, .dark *));
 @custom-variant can-hover (@media (hover: hover));

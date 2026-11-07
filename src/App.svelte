@@ -1,17 +1,20 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import type { Component } from 'svelte';
-  import { PanelLeft, PanelRight, X, GitBranch, Bell, Plug, Monitor, TriangleAlert, Check, FolderOpen, Download, FolderPlus, ChevronDown, TerminalSquare, GitCompareArrows, Plus, ArrowLeft } from 'lucide-svelte';
+  import { PanelLeft, PanelRight, X, GitBranch, Bell, Plug, Monitor, TriangleAlert, Check, TerminalSquare, GitCompareArrows, Plus, ArrowLeft } from 'lucide-svelte';
   import Sidebar from './ui/Sidebar.svelte';
   import Workspace from './ui/Workspace.svelte';
   import Landing from './ui/Landing.svelte';
   import CreateWorkspace from './ui/CreateWorkspace.svelte';
   import WorkspacePalette from './ui/WorkspacePalette.svelte';
   import RightSidebar from './ui/RightSidebar.svelte';
+  import ProjectAdmission from './ui/ProjectAdmission.svelte';
   import WindowControls from './ui/WindowControls.svelte';
   import { loadPreferences, preferenceKey, type UiPreferences } from './ui/preferences';
   import type { Project, Settings, Worker } from './types';
-  import { addProject, bootstrap, createWorkers, deleteWorker, diffWorker, errorMessage, isDesktop, killWorker, mergeWorker, openEditor, restartWorker, saveSettings, subscribeWorkerEvents } from './api';
+  import { bootstrap, createWorkers, deleteWorker, diffWorker, errorMessage, isDesktop, killWorker, mergeWorker, openEditor, restartWorker, saveSettings, subscribeWorkerEvents } from './api';
+  import { getWorkspaceFileDiff } from './workspace-api';
+  import { watchWorkspace } from './workspace-watch';
 
   type Action = 'restart' | 'stop' | 'editor' | 'diff' | 'merge' | 'delete';
   const desktop = isDesktop();
@@ -30,11 +33,6 @@
   let createOpen = $state(false);
   let paletteOpen = $state(false);
   let projectOpen = $state(false);
-  let projectPathMode = $state(false);
-  let repoPath = $state('');
-  let projectBusy = $state(false);
-  let projectError = $state<string|null>(null);
-  let projectDialog = $state<HTMLDialogElement>();
   let confirmDialog = $state<HTMLDialogElement>();
   let confirm = $state<{action:'merge'|'delete';worker:Worker;busy:boolean;error:string|null}|null>(null);
   let diff = $state<string|null>(null);
@@ -42,6 +40,13 @@
   let diffError = $state<string|null>(null);
   let diffWorkerId = $state<string|null>(null);
   let diffOpen = $state(false);
+  let diffRequest = $state<{workerId:string;path:string;staged:boolean}|null>(null);
+  let fileTarget = $state<{worker:Worker;path:string;line?:number}|null>(null);
+  type FileEditorProps = {worker:Worker;path:string;line?:number;rightSidebarVisible?:boolean;workerAvailable?:boolean;onClose:()=>void};
+  let FileEditorView = $state<Component<FileEditorProps,{requestClose:()=>Promise<boolean>}>|null>(null);
+  let fileViewLoading = $state(false);
+  let fileViewError = $state<string|null>(null);
+  let fileEditor = $state<{requestClose():Promise<boolean>}>();
   type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void };
   type DiffViewProps = { text: string; worker: Worker; onClose: () => void; onRefresh: () => void; loading: boolean; error: string|null };
   let SettingsView = $state<Component<SettingsViewProps>|null>(null);
@@ -84,10 +89,11 @@
     if (activeWorkerId === id) activeWorkerId = workers.find(w => w.project_id === selectedProjectId)?.id ?? null;
     if (diffWorkerId === id) { diffWorkerId = null; diffOpen = false; diff = null; }
   }
-  function select(projectId:string,workerId?:string,record = true) {
+  async function select(projectId:string,workerId?:string,record = true) {
+    if (!(await leaveFile())) return;
     selectedProjectId = projectId;
     activeWorkerId = workerId ?? workers.find(w => w.project_id === projectId)?.id ?? null;
-    page = 'terminal'; diffOpen = false;
+    page = 'terminal'; diffOpen = false; diffRequest = null;
     if (record) {
       const previous = history[historyIndex];
       if (previous?.projectId !== projectId || previous.workerId !== activeWorkerId) {
@@ -96,11 +102,11 @@
       }
     }
   }
-  function navigate(offset:number) {
+  async function navigate(offset:number) {
     const index = historyIndex+offset;
     const target = history[index];
-    if (!target) return;
-    historyIndex = index; select(target.projectId,target.workerId,false);
+    if (!target || !(await leaveFile())) return;
+    historyIndex = index; await select(target.projectId,target.workerId,false);
   }
   async function start() {
     if (starting || disposed) return;
@@ -132,30 +138,51 @@
     finally { hydrating = false; starting = false; if (!disposed) booting = false; }
   }
   async function create(projectId:string,name:string,count:number,keepOpen = false) {
+    if (!(await leaveFile())) throw new Error('Workspace creation cancelled; the current file is still open.');
     const values = await createWorkers(projectId,count,name);
     for (const value of values) applyWorker(value);
-    select(projectId,values[0]?.id); createOpen = keepOpen;
+    await select(projectId,values[0]?.id); createOpen = keepOpen;
   }
   async function newTerminal():Promise<Worker|null> {
     if (!project) return null;
+    if (!(await leaveFile())) return null;
     const values = await createWorkers(project.id,1,'');
     for (const value of values) applyWorker(value);
     activeWorkerId = values[0]?.id ?? activeWorkerId;
     return values[0] ?? null;
   }
-  async function add(event:SubmitEvent) {
-    event.preventDefault(); if (projectBusy) return;
-    if (!repoPath.trim()) { projectError = 'Enter the path to a local Git repository.'; return; }
-    projectBusy = true; projectError = null;
-    try { const value = await addProject(repoPath.trim()); projects = [...projects.filter(p => p.id !== value.id),value]; select(value.id); projectOpen = false; repoPath = ''; }
-    catch (error) { projectError = errorMessage(error); }
-    finally { projectBusy = false; }
+  async function leaveFile():Promise<boolean> {
+    const previous = fileTarget;
+    if (!previous) return true;
+    if (fileEditor && !(await fileEditor.requestClose())) return false;
+    if (fileTarget !== previous) return false;
+    fileTarget = null;
+    return true;
+  }
+  async function loadFileView() {
+    if (FileEditorView || fileViewLoading) return;
+    fileViewLoading = true; fileViewError = null;
+    try { FileEditorView = (await import('./ui/FileEditor.svelte')).default; }
+    catch (error) { fileViewError = errorMessage(error); }
+    finally { fileViewLoading = false; }
+  }
+  async function openFile(path:string,line?:number) {
+    const target = worker;
+    if (!target) return;
+    if (fileTarget?.worker.id === target.id && fileTarget.path === path) {
+      fileTarget = {...fileTarget,line}; return;
+    }
+    if (!(await leaveFile())) return;
+    fileTarget = {worker:target,path,line};
+    page = 'terminal'; diffOpen = false;
+    void loadFileView();
   }
   async function refreshDiff(target = worker) {
     if (!target) return;
     const generation = ++diffGeneration;
     diffWorkerId = target.id; diffLoading = true; diffError = null; diff = null;
-    try { const text = await diffWorker(target.id); if (generation === diffGeneration) diff = text; }
+    const request = diffRequest?.workerId === target.id ? diffRequest : null;
+    try { const text = request ? await getWorkspaceFileDiff(target.id,request.path,request.staged) : await diffWorker(target.id); if (generation === diffGeneration) diff = text; }
     catch (error) { if (generation === diffGeneration) diffError = errorMessage(error); }
     finally { if (generation === diffGeneration) diffLoading = false; }
   }
@@ -166,11 +193,11 @@
     catch (error) { diffViewError = errorMessage(error); }
     finally { diffViewLoading = false; }
   }
-  function openDiff(target:Worker) {
-    page = 'terminal';
-    diffOpen = true;
-    void loadDiffView();
-    void refreshDiff(target);
+  async function openDiff(target:Worker,path?:string,staged = false) {
+    if (!(await leaveFile())) return;
+    diffRequest = path ? {workerId:target.id,path,staged} : null;
+    page = 'terminal'; diffOpen = true;
+    void loadDiffView(); void refreshDiff(target);
   }
   async function loadSettings() {
     if (SettingsView || settingsLoading) return;
@@ -179,13 +206,15 @@
     catch (error) { settingsError = errorMessage(error); }
     finally { settingsLoading = false; }
   }
-  function openSettings() {
+  async function openSettings() {
+    if (!(await leaveFile())) return;
     page = 'settings'; diffOpen = false;
     void loadSettings();
   }
   function closeSettings() { page = 'terminal'; }
   async function action(kind:Action,target:Worker) {
-    if (kind === 'diff') { openDiff(target); return; }
+    if (kind === 'diff') { await openDiff(target); return; }
+    if (kind === 'delete' && fileTarget?.worker.id === target.id && !(await leaveFile())) return;
     if (kind === 'merge' || kind === 'delete') { confirm = {action:kind,worker:target,busy:false,error:null}; return; }
     if (busy.has(target.id)) return;
     busy.add(target.id);
@@ -211,7 +240,7 @@
     catch (error) { notify(`Could not save appearance: ${errorMessage(error)}`,true); }
   }
   function setPanel(value:string) { panel = value; rightVisible = true; }
-  function feature(name:string) { page = name; diffOpen = false; }
+  async function feature(name:string) { if (!(await leaveFile())) return; page = name; diffOpen = false; }
   let viewportWidth = $state(1440);
   const shellViewport = $derived(Math.max(320, Number.isFinite(viewportWidth) ? viewportWidth : 1440));
   const compactShell = $derived(shellViewport < 960);
@@ -282,7 +311,7 @@
       if (key === 'n') { event.preventDefault(); createOpen = true; return; }
       if (key === 'p' && !event.shiftKey) { event.preventDefault(); setPanel('search'); return; }
       if (event.shiftKey && ['b','m','o'].includes(key)) { event.preventDefault(); feature(key === 'b' ? 'Browser' : 'Markdown'); return; }
-      if (event.shiftKey && key === 'backspace' && worker) { event.preventDefault(); confirm = {action:'delete',worker,busy:false,error:null}; return; }
+      if (event.shiftKey && key === 'backspace' && worker) { event.preventDefault(); void action('delete',worker); return; }
       if (key === 'b' && !event.shiftKey) { event.preventDefault(); toggleSidebar(); return; }
       if (key === 'l' && !event.shiftKey) { event.preventDefault(); toggleRightSidebar(); return; }
       if (event.shiftKey && ['e','f','g'].includes(key)) { event.preventDefault(); setPanel(key === 'e' ? 'explorer' : key === 'f' ? 'search' : 'source-control'); return; }
@@ -297,6 +326,11 @@
       if (event.shiftKey && key === 'y') { event.preventDefault(); feature('Plugins'); return; }
     }
     if (event.ctrlKey && event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); navigate(event.key === 'ArrowLeft' ? -1 : 1); return; }
+    if (fileTarget) {
+      if (event.ctrlKey && key === 'w') { event.preventDefault(); void leaveFile(); }
+      else if (event.ctrlKey && key === 't') { event.preventDefault(); void newTerminal().catch(error => notify(errorMessage(error),true)); }
+      return;
+    }
     if (diffOpen) {
       if (event.ctrlKey && key === 'w') { event.preventDefault(); diffOpen = false; }
       else if (event.ctrlKey && key === 't') { event.preventDefault(); void newTerminal().then(() => { diffOpen = false; }).catch(error => notify(errorMessage(error),true)); }
@@ -310,14 +344,6 @@
     catch { /* The live selection remains usable without browser storage. */ }
   });
   $effect(() => {
-    const id = activeWorkerId;
-    if (panel !== 'source-control' || !effectiveRight) return;
-    untrack(() => {
-      if (id) void refreshDiff(workers.find(value => value.id === id) ?? null);
-      else { diffGeneration++; diff = null; diffWorkerId = null; diffError = null; diffLoading = false; }
-    });
-  });
-  $effect(() => {
     document.documentElement.classList.toggle('dark',preferences.theme === 'dark' || preferences.theme === 'system' && systemDark);
     document.documentElement.style.fontSize = `${preferences.fontSize/14*16}px`;
     document.documentElement.dataset.reduceMotion = String(preferences.reduceMotion);
@@ -328,14 +354,13 @@
     window.addEventListener('resize',update);
     return () => window.removeEventListener('resize',update);
   });
-  $effect(() => {
-    if (projectOpen && projectDialog && !projectDialog.open) {
-      projectPathMode = false; projectError = null;
-      projectDialog.showModal();
-      queueMicrotask(() => projectDialog?.querySelector<HTMLButtonElement>('[data-project-browse]')?.focus());
-    } else if (!projectOpen && projectDialog?.open) projectDialog.close();
-  });
   $effect(() => { if (confirm && confirmDialog && !confirmDialog.open) confirmDialog.showModal(); else if (!confirm && confirmDialog?.open) confirmDialog.close(); });
+  const watchedWorkerId = $derived(page === 'terminal' && (effectiveRight || fileTarget !== null) ? activeWorkerId : null);
+  $effect(() => {
+    const id = watchedWorkerId;
+    if (!desktop || !id) return;
+    return watchWorkspace(id,error => notify(`File updates: ${errorMessage(error)}`,true));
+  });
   onMount(() => {
     const media = matchMedia('(prefers-color-scheme: dark)'); systemDark = media.matches;
     const themeChanged = () => { systemDark = media.matches; }; media.addEventListener('change',themeChanged);
@@ -392,6 +417,16 @@
           {#if booting}<div class="flex h-full items-center justify-center text-sm text-muted-foreground" role="status">Loading workspace…</div>
           {:else if bootError}<div class="m-auto max-w-lg space-y-3 p-6" role="alert"><h1 class="text-lg font-semibold">Workspace failed to load</h1><p class="mn-error">{bootError}</p><button class="mn-button" onclick={start}>Retry</button></div>
           {:else if page !== 'terminal'}<div class="flex min-h-0 flex-1 flex-col"><header class="border-b border-border px-6 py-5"><h1 class="text-xl font-semibold">{page}</h1></header><div class="m-auto max-w-lg space-y-3 p-8 text-center"><h2 class="text-lg font-medium">{page} is unavailable in this build</h2><p class="text-sm text-muted-foreground">This Orca shell entry is reserved. Minnow does not start the associated service.</p><button class="mn-button" onclick={() => { page = 'terminal'; }}>Back to workspace</button></div></div>
+          {:else if fileTarget}
+            {#if FileEditorView}
+              {#key `${fileTarget.worker.id}:${fileTarget.path}`}
+                <FileEditorView bind:this={fileEditor} worker={fileTarget.worker} path={fileTarget.path} line={fileTarget.line} rightSidebarVisible={effectiveRight} workerAvailable={workers.some(value => value.id === fileTarget?.worker.id)} onClose={() => { fileTarget = null; }}/>
+              {/key}
+            {:else if fileViewError}
+              <div class="m-auto max-w-lg space-y-3 p-6" role="alert"><h2 class="text-lg font-semibold">Editor failed to load</h2><p class="mn-error">{fileViewError}</p><div class="flex gap-2"><button class="mn-button" onclick={() => { void loadFileView(); }}>Retry</button><button class="mn-button" onclick={() => { fileTarget = null; }}>Back to workspace</button></div></div>
+            {:else}
+              <div class="m-auto p-6 text-sm text-muted-foreground" role="status">Loading file editor…</div>
+            {/if}
           {:else if diffOpen && diffTarget}
             <div class="titlebar" data-tauri-drag-region>
               {#if !effectiveSidebar}<button class="mn-icon-button ml-2" aria-label="Toggle sidebar" title="Toggle sidebar (Ctrl+B)" onclick={toggleSidebar}><PanelLeft size={16}/></button>{/if}
@@ -420,35 +455,15 @@
           {:else}<Landing hasProjects={projects.length > 0} onAddProject={() => { projectOpen = true; }} onCreate={() => { createOpen = true; }}/>{/if}
         </div>
       </main>
-      {#if effectiveRight}<aside class="shell-right" style:width={`${shellWidths.right}px`}><RightSidebar {project} {worker} workers={projectWorkers} {panel} {diff} loading={diffLoading} error={diffError} onPanel={setPanel} onRefresh={() => { void refreshDiff(); }} onOpenDiff={() => { if (worker) openDiff(worker); }} onAction={(kind,value) => { void action(kind,value); }} onSelect={id => { activeWorkerId = id; }} onFeature={feature} onClose={() => { rightVisible = false; }}/><div role="slider" aria-label="Resize right sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="600" aria-valuenow={shellWidths.right} tabindex="0" class="sidebar-resizer left-edge" onpointerdown={event => resize(event,'right')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,rightSidebarWidth:Math.max(220,Math.min(600,shellWidths.right+(event.key === 'ArrowLeft' ? 10 : -10)))}); } }}></div></aside>{/if}
+      {#if effectiveRight}<aside class="shell-right" style:width={`${shellWidths.right}px`}><RightSidebar {worker} workers={projectWorkers} {panel} onPanel={setPanel} onRefresh={() => { if (diffOpen) void refreshDiff(diffTarget); }} onOpenDiff={(path,staged) => { if (worker) void openDiff(worker,path,staged); }} onOpenFile={(path,line) => { void openFile(path,line); }} onSelect={id => { if (project) void select(project.id,id); }} onClose={() => { rightVisible = false; }}/><div role="slider" aria-label="Resize right sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="600" aria-valuenow={shellWidths.right} tabindex="0" class="sidebar-resizer left-edge" onpointerdown={event => resize(event,'right')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,rightSidebarWidth:Math.max(220,Math.min(600,shellWidths.right+(event.key === 'ArrowLeft' ? 10 : -10)))}); } }}></div></aside>{/if}
     </div>
   {/if}
   <footer class="mn-statusbar"><div class="flex min-w-0 items-center"><button aria-label="Notifications" onclick={() => feature('Activity')}><Bell size={12}/></button>{#if worker}<span class="truncate">{worker.status}</span><button onclick={() => { void action('diff',worker); }}><GitBranch size={12}/><span class="max-w-56 truncate">{worker.branch}</span></button>{/if}</div><div class="flex items-center"><button onclick={() => feature('Plugins')} title="Plugins"><Plug size={12}/><span>Off</span></button><button onclick={openSettings}><Monitor size={12}/><span>{workers.filter(w => w.pid !== null).length} workers</span></button><button onclick={() => feature('Remote Hosts')}>0 hosts</button></div></footer>
 </div>
-<WindowControls onError={message => notify(message,true)}/>
+<WindowControls onError={message => notify(message,true)} onBeforeClose={leaveFile}/>
 {#if createOpen}<CreateWorkspace {projects} {selectedProjectId} defaultCount={settings.default_worker_count} onCreate={create} onAddProject={() => { createOpen = false; projectOpen = true; }} onClose={() => { createOpen = false; }}/>{/if}
 {#if paletteOpen}<WorkspacePalette {projects} {workers} onSelect={select} onCreate={() => { paletteOpen = false; createOpen = true; }} onClose={() => { paletteOpen = false; }}/>{/if}
-<dialog bind:this={projectDialog} class="mn-dialog" aria-labelledby="add-project-title" oncancel={event => { if (projectBusy) event.preventDefault(); else projectOpen = false; }} onclose={() => { projectOpen = false; }}>
-  <form onsubmit={add} class="space-y-5">
-    <div class="flex items-center justify-between"><h2 id="add-project-title">Add a project</h2><button type="button" class="mn-icon-button" aria-label="Close add project" disabled={projectBusy} onclick={() => { projectOpen = false; }}><X size={16}/></button></div>
-    {#if projects.length === 0}<p>Add a project to get started with Minnow.</p>{/if}
-    <div class="flex items-center gap-2 text-xs text-muted-foreground"><span>Host</span><span class="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-muted/30 px-2"><span>Local Windows</span><ChevronDown size={12}/></span></div>
-    {#if projectPathMode}
-      <div class="space-y-2"><label class="block text-xs font-medium" for="repo-path">Project folder</label><input id="repo-path" class="mn-input" bind:value={repoPath} placeholder="C:\path\to\repository" disabled={projectBusy}/><p class="text-xs text-muted-foreground">Enter a local Git repository path. Minnow does not include a native folder picker.</p></div>
-      {#if projectError}<p class="mn-error" role="alert">{projectError}</p>{/if}
-      <div class="flex justify-end"><button class="mn-button primary" disabled={projectBusy}>{projectBusy ? 'Adding project…' : 'Add project'}</button></div>
-    {:else}
-      <button data-project-browse type="button" class="flex min-h-[60px] w-full items-center gap-3 rounded-md border border-input px-3 py-2.5 text-left hover:bg-accent focus:bg-accent focus-visible:ring-2 focus-visible:ring-ring" onclick={() => { projectPathMode = true; }}><span class="grid size-7 shrink-0 place-items-center rounded-md bg-muted"><FolderOpen size={16}/></span><span class="flex-1"><span class="block text-sm font-medium">Browse folder</span><span class="block text-xs text-muted-foreground">Local project, Git repo, or folder with many repos</span></span><kbd class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">⏎</kbd></button>
-      <div class="space-y-1.5">
-        <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Other ways to add</p>
-        <div class="overflow-hidden rounded-md border border-input bg-background">
-          <button type="button" disabled class="flex w-full items-center gap-3 px-3 py-2.5 text-left opacity-60" title="Unavailable in this build"><Download size={16}/><span><span class="block text-sm font-medium">Clone from URL</span><span class="block text-xs text-muted-foreground">Unavailable in this build</span></span></button>
-          <button type="button" disabled class="flex w-full items-center gap-3 border-t border-border/70 px-3 py-2.5 text-left opacity-60" title="Unavailable in this build"><Plus size={16}/><span><span class="block text-sm font-medium">Create new project</span><span class="block text-xs text-muted-foreground">Unavailable in this build</span></span></button>
-        </div>
-      </div>
-    {/if}
-  </form>
-</dialog>
+{#if projectOpen}<ProjectAdmission repoCount={projects.length} onAdded={async value => { projects = [...projects.filter(p => p.id !== value.id),value]; await select(value.id); }} onClose={() => { projectOpen = false; }}/>{/if}
 <dialog bind:this={confirmDialog} class="mn-dialog" aria-labelledby="confirm-title" oncancel={event => { if (confirm?.busy) event.preventDefault(); else confirm = null; }} onclose={() => { if (!confirm?.busy) confirm = null; }}>
   {#if confirm}<h2 id="confirm-title">{confirm.action === 'delete' ? 'Delete workspace' : 'Merge workspace'}</h2><p class="mt-3">{confirm.action === 'delete' ? `Delete ${confirm.worker.name} and its worktree? Dirty files and unmerged changes prevent deletion. Session history is retained.` : `Merge ${confirm.worker.branch} into ${confirm.worker.base_ref}? Stop the worker and commit its changes first. Both trees must be clean.`}</p>{#if confirm.error}<p class="mn-error mt-3" role="alert">{confirm.error}</p>{/if}<div class="mt-6 flex justify-end gap-2"><button class="mn-button" disabled={confirm.busy} onclick={() => { confirm = null; }}>Cancel</button><button class="mn-button" class:danger={confirm.action === 'delete'} disabled={confirm.busy} onclick={confirmAction}>{confirm.busy ? 'Working…' : confirm.action === 'delete' ? 'Delete workspace' : 'Merge'}</button></div>{/if}
 </dialog>

@@ -1,0 +1,152 @@
+use super::*;
+
+fn repository() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git::git_ok(Some(root), &["init", "--initial-branch=main"], "initialize fixture").unwrap();
+    git::git_ok(Some(root), &["config", "user.name", "Minnow Tests"], "configure fixture").unwrap();
+    git::git_ok(Some(root), &["config", "user.email", "tests@minnow.invalid"], "configure fixture").unwrap();
+    git::git_ok(Some(root), &["config", "commit.gpgsign", "false"], "configure fixture").unwrap();
+    git::git_ok(Some(root), &["commit", "--allow-empty", "-m", "Initial fixture"], "initialize fixture").unwrap();
+    directory
+}
+
+#[test]
+fn save_refuses_stale_content_and_create_only_collisions() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("document.txt"), "original\r\n").unwrap();
+    let original = read_file(root, "document.txt").unwrap();
+    fs::write(root.join("document.txt"), "external edit\r\n").unwrap();
+    assert!(write_file(root, "document.txt", "lost update", &original.revision).is_err());
+    assert!(write_file(root, "document.txt", "create over existing", "").is_err());
+    assert_eq!(fs::read_to_string(root.join("document.txt")).unwrap(), "external edit\r\n");
+    let latest = read_file(root, "document.txt").unwrap();
+    let saved = write_file(root, "document.txt", "accepted edit\r\n", &latest.revision).unwrap();
+    assert_eq!(fs::read_to_string(root.join("document.txt")).unwrap(), saved.content);
+    assert_eq!(read_file(root, "document.txt").unwrap().revision, saved.revision);
+    let created = write_file(root, "new.txt", "created", "").unwrap();
+    assert_eq!(read_file(root, "new.txt").unwrap().content, created.content);
+}
+
+#[test]
+fn workspace_paths_cannot_escape_or_expose_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(directory.path().join("outside.txt"), "outside").unwrap();
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), "metadata").unwrap();
+    for path in ["../outside.txt", ".git/config", ".minnow/state", "C:\\outside.txt", "\\\\host\\share\\file"] {
+        assert!(read_file(&root, path).is_err(), "read permitted {path}");
+        assert!(write_file(&root, path, "unexpected", "").is_err(), "write permitted {path}");
+    }
+    let absolute = directory.path().join("outside.txt");
+    assert!(read_file(&root, absolute.to_str().unwrap()).is_err());
+    assert_eq!(fs::read_to_string(absolute).unwrap(), "outside");
+}
+
+#[test]
+fn text_search_is_bounded_on_one_long_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("long.txt"), format!("éé{}", "a".repeat(1_000_000))).unwrap();
+    let result = search(root, "a", true).unwrap();
+    assert_eq!(result.matches.len(), MAX_SEARCH_HITS);
+    assert!(result.truncated);
+    assert_eq!(result.matches[0].column, 3);
+    assert_eq!(result.matches[MAX_SEARCH_HITS - 1].column, (MAX_SEARCH_HITS + 2) as u32);
+}
+
+#[test]
+fn insensitive_search_reports_original_unicode_columns_and_literal_patterns() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("unicode.txt"), "İaZ\n[A]+ literal\n").unwrap();
+    let insensitive = search(root, "z", false).unwrap();
+    assert_eq!(insensitive.matches.iter().map(|hit| (hit.line, hit.column)).collect::<Vec<_>>(), vec![(1, 3)]);
+    let literal = search(root, "[A]+", true).unwrap();
+    assert_eq!(literal.matches.iter().map(|hit| (hit.line, hit.column)).collect::<Vec<_>>(), vec![(2, 1)]);
+    assert!(search(root, "z", true).unwrap().matches.is_empty());
+}
+
+#[test]
+fn staging_is_literal_and_unstaging_preserves_working_files() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("[one].txt"), "selected").unwrap();
+    fs::write(root.join("o.txt"), "not selected").unwrap();
+    stage_paths(root, Some(vec!["[one].txt".into()])).unwrap();
+    let status = git_status(root).unwrap();
+    assert_eq!(status.staged.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), vec!["[one].txt"]);
+    assert_eq!(status.untracked.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), vec!["o.txt"]);
+    unstage_paths(root, Some(vec!["[one].txt".into()])).unwrap();
+    assert!(git_status(root).unwrap().staged.is_empty());
+    assert_eq!(fs::read_to_string(root.join("[one].txt")).unwrap(), "selected");
+}
+
+#[test]
+fn commit_preserves_unstaged_changes_and_history_control_characters() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("document.txt"), "staged\n").unwrap();
+    stage_paths(root, Some(vec!["document.txt".into()])).unwrap();
+    fs::write(root.join("document.txt"), "unstaged\n").unwrap();
+    let status = git_status(root).unwrap();
+    assert_eq!(status.staged[0].path, "document.txt");
+    assert_eq!(status.unstaged[0].path, "document.txt");
+    let subject = "Save staged version \u{1f} without losing history fields";
+    let id = commit(root, subject).unwrap();
+    let history = git_history(root, 1).unwrap();
+    assert_eq!(history[0].id, id);
+    assert_eq!(history[0].subject, subject);
+    assert_eq!(history[0].author, "Minnow Tests");
+    assert_eq!(git::git_ok(Some(root), &["show", "HEAD:document.txt"], "inspect commit").unwrap(), "staged\n");
+    assert_eq!(fs::read_to_string(root.join("document.txt")).unwrap(), "unstaged\n");
+    let status = git_status(root).unwrap();
+    assert!(status.staged.is_empty());
+    assert_eq!(status.unstaged[0].status, "M");
+}
+
+#[test]
+fn untracked_file_diff_uses_actual_content_and_literal_ignore_paths() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("[draft].txt"), "actual untracked text\n").unwrap();
+    let diff = file_diff(root, "[draft].txt", false).unwrap();
+    assert!(diff.contains("+++ b/[draft].txt\n"));
+    assert!(diff.contains("+actual untracked text\n"));
+    fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(root.join("ignored.txt"), "ignored content\n").unwrap();
+    assert_eq!(file_diff(root, "ignored.txt", false).unwrap(), "");
+}
+
+#[test]
+fn staging_renamed_destination_does_not_stage_recreated_source() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("original.txt"), "tracked content\n").unwrap();
+    stage_paths(root, Some(vec!["original.txt".into()])).unwrap();
+    commit(root, "track original").unwrap();
+    git::git_ok(Some(root), &["mv", "original.txt", "renamed.txt"], "rename fixture").unwrap();
+    fs::write(root.join("original.txt"), "unrelated replacement\n").unwrap();
+    fs::write(root.join("renamed.txt"), "tracked content\nselected edit\n").unwrap();
+    stage_paths(root, Some(vec!["renamed.txt".into()])).unwrap();
+    let status = git_status(root).unwrap();
+    assert_eq!(status.untracked.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(), vec!["original.txt"]);
+    assert!(!status.staged.iter().any(|entry| entry.path == "original.txt"));
+    assert!(file_diff(root, "renamed.txt", true).unwrap().contains("+selected edit"));
+}
+
+#[cfg(unix)]
+#[test]
+fn untracked_symlink_diff_reports_link_not_target_contents() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("target.txt"), "target contents must not be exposed\n").unwrap();
+    std::os::unix::fs::symlink("target.txt", root.join("link.txt")).unwrap();
+    let diff = file_diff(root, "link.txt", false).unwrap();
+    assert!(diff.contains("new file mode 120000"));
+    assert!(diff.contains("+target.txt\n"));
+    assert!(!diff.contains("target contents must not be exposed"));
+}

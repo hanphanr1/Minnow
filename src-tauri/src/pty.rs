@@ -196,6 +196,12 @@ impl Manager {
         self.sessions.lock().unwrap().get(id).cloned().ok_or_else(|| "Worker no longer exists".into())
     }
 
+    pub(crate) fn worktree_path(&self, id: &str) -> Result<std::path::PathBuf, String> {
+        let session = self.session(id)?;
+        let worker = session.worker.lock().unwrap();
+        Ok(std::path::PathBuf::from(&worker.path))
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let _operation = self.operations.lock().unwrap();
         let mut workers: Vec<_> = self.sessions.lock().unwrap().values().map(|s| s.worker()).collect();
