@@ -12,6 +12,7 @@ export interface DirectoryListing { entries: DirectoryEntry[]; truncated: boolea
 export interface FileDocument { path: string; content: string; revision: string }
 export interface SearchMatch { path: string; line: number; column: number; text: string }
 export interface SearchResults { matches: SearchMatch[]; truncated: boolean }
+export interface FileList { paths: string[]; truncated: boolean }
 export interface GitFileChange { path: string; old_path: string | null; status: string }
 export interface GitStatus {
   branch: string;
@@ -32,6 +33,14 @@ export function writeWorkspaceFile(workerId: string, path: string, content: stri
 }
 export function searchWorkspace(workerId: string, query: string, caseSensitive = false): Promise<SearchResults> {
   return invoke('search_workspace', { workerId, query, caseSensitive });
+}
+/** Workspace-relative files whose path contains every whitespace-separated token of `query`. */
+export function findWorkspaceFiles(workerId: string, query: string, includeDotfiles: boolean): Promise<FileList> {
+  return invoke('find_workspace_files', { workerId, query, includeDotfiles });
+}
+/** The subset of `paths` that Git ignores. */
+export function getWorkspaceGitIgnored(workerId: string, paths: string[]): Promise<string[]> {
+  return invoke('workspace_git_ignored', { workerId, paths });
 }
 export function getWorkspaceGitStatus(workerId: string): Promise<GitStatus> {
   return invoke('workspace_git_status', { workerId });

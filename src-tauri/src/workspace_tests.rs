@@ -150,3 +150,23 @@ fn untracked_symlink_diff_reports_link_not_target_contents() {
     assert!(diff.contains("+target.txt\n"));
     assert!(!diff.contains("target contents must not be exposed"));
 }
+
+#[test]
+fn ignored_paths_follow_gitignore_and_reject_unsafe_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    crate::git::git_ok(Some(root), &["init", "--initial-branch=main"], "init").unwrap();
+    fs::write(root.join(".gitignore"), "dist/\n*.log\n").unwrap();
+    fs::create_dir_all(root.join("dist")).unwrap();
+    fs::write(root.join("dist/out.js"), "x").unwrap();
+    fs::write(root.join("a.log"), "x").unwrap();
+    fs::write(root.join("keep.txt"), "x").unwrap();
+
+    let wanted = ["dist", "dist/out.js", "a.log", "keep.txt"].map(String::from).to_vec();
+    let mut ignored = git_ignored_paths(root, &wanted).unwrap();
+    ignored.sort();
+    assert_eq!(ignored, ["a.log", "dist", "dist/out.js"]);
+    assert!(git_ignored_paths(root, &["keep.txt".to_string()]).unwrap().is_empty());
+    assert!(git_ignored_paths(root, &["../escape".to_string()]).is_err());
+    assert!(git_ignored_paths(root, &["C:/x".to_string()]).is_err());
+}

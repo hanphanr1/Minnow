@@ -36,7 +36,7 @@ The shell milestone is not complete Orca parity. The requested continuation incl
 - [x] Multiple independent terminals in the same worktree, including split cwd inheritance (OSC 7 only; see SESSION_HANDOFF.md for the Windows evidence).
 - [x] Native coalesced file-change invalidation for the visible workspace and Git index.
 - [ ] Quick open, file operations and remaining explorer interactions.
-- [ ] Source-matched persistent Explorer Names/Contents strip, global filename filtering and Git decorations.
+- [x] Source-matched persistent Explorer Names/Contents strip, global filename filtering (native `find_workspace_files`), Git status/ignored decorations and dotfile/ignored toggles. Still open: file operations (new/rename/delete/drag), quick open and the row context menu.
 - [ ] File and diff tabs inside workspace groups, with independent dirty-document ownership, rather than a whole-center replacement.
 - [ ] Branch selection, nested workspaces, non-Git folder projects and attached worktrees.
 - [ ] Source-control conflicts/discard, history pagination, diff comments and split-open behavior.

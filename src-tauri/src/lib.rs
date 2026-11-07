@@ -81,6 +81,16 @@ async fn search_workspace(engine: State<'_, Engine>, worker_id: String, query: S
 }
 
 #[tauri::command]
+async fn find_workspace_files(engine: State<'_, Engine>, worker_id: String, query: String, include_dotfiles: bool) -> Result<workspace::FileList, String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::find_files(root, &query, include_dotfiles)).await
+}
+
+#[tauri::command]
+async fn workspace_git_ignored(engine: State<'_, Engine>, worker_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::git_ignored_paths(root, &paths)).await
+}
+
+#[tauri::command]
 async fn workspace_git_status(engine: State<'_, Engine>, worker_id: String) -> Result<workspace::GitStatus, String> {
     in_workspace(engine.inner().clone(), worker_id, workspace::git_status).await
 }
@@ -282,8 +292,8 @@ pub fn run() {
             create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,
             pick_project_folder, create_project, clone_project,
-            list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace,
-            workspace_git_status, workspace_git_history, stage_workspace_paths,
+            list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace, find_workspace_files,
+            workspace_git_status, workspace_git_ignored, workspace_git_history, stage_workspace_paths,
             unstage_workspace_paths, commit_workspace, workspace_file_diff, watch_workspace
         ])
         .build(context)

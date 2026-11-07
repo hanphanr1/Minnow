@@ -17,9 +17,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::{
-    canonical_root, clip_line, is_metadata_name, read_bounded, relative_slash, SearchMatch,
-    SearchResults, MAX_SEARCH_BYTES, MAX_SEARCH_CANDIDATES, MAX_SEARCH_HITS, MAX_TEXT_BYTES,
+    canonical_root, clip_line, is_metadata_name, read_bounded, relative_slash, FileList,
+    SearchMatch, SearchResults, MAX_SEARCH_BYTES, MAX_SEARCH_CANDIDATES, MAX_SEARCH_HITS,
+    MAX_TEXT_BYTES,
 };
+
+/// Same cap as Orca's name filter query (`FILE_NAME_FILTER_QUERY_MAX_BYTES`).
+const FILE_NAME_FILTER_QUERY_MAX_BYTES: usize = 2 * 1024;
+/// Most paths one Find files request returns.
+const MAX_FIND_FILES: usize = 20_000;
 
 /// Hard bounds for ignore configuration. Each file is capped independently and
 /// the whole search shares an aggregate budget so a tree of hostile
@@ -39,11 +45,160 @@ pub fn search(root: &Path, query: &str, case_sensitive: bool) -> Result<SearchRe
     if query.is_empty() {
         return Err("search text is empty".to_string());
     }
-    let root = canonical_root(root)?;
     let pattern = RegexBuilder::new(&regex::escape(query))
         .case_insensitive(!case_sensitive)
         .build()
         .map_err(|error| format!("cannot prepare the literal search: {error}"))?;
+
+    let mut matches: Vec<SearchMatch> = Vec::new();
+    let mut truncated = false;
+    let mut candidates = 0usize;
+    let mut scanned_bytes = 0u64;
+
+    let walk_truncated = walk_files(root, |path, rel, entry| {
+        candidates += 1;
+        if candidates > MAX_SEARCH_CANDIDATES {
+            truncated = true;
+            return Flow::Stop;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => return Flow::Continue,
+        };
+        if !metadata.is_file() {
+            return Flow::Continue;
+        }
+        if metadata.len() > MAX_TEXT_BYTES {
+            truncated = true;
+            return Flow::Continue;
+        }
+        if metadata.len() > MAX_SEARCH_BYTES.saturating_sub(scanned_bytes) {
+            truncated = true;
+            return Flow::Stop;
+        }
+        let bytes = match read_bounded(path, "search candidate") {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                truncated = true;
+                return Flow::Continue;
+            }
+        };
+        scanned_bytes += bytes.len() as u64;
+        if bytes.len() as u64 > MAX_TEXT_BYTES {
+            truncated = true;
+            return Flow::Continue;
+        }
+        if bytes.contains(&0) {
+            return Flow::Continue;
+        }
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => return Flow::Continue,
+        };
+
+        let mut limit_reached = false;
+        for (line_index, line) in text.lines().enumerate() {
+            // One forward scan over the line keeps Unicode columns exact and
+            // avoids re-counting the prefix for every match on a huge line.
+            let mut characters = line.char_indices().peekable();
+            let mut column = 1u32;
+            for found in pattern.find_iter(line) {
+                while let Some(&(byte_index, _)) = characters.peek() {
+                    if byte_index >= found.start() {
+                        break;
+                    }
+                    characters.next();
+                    column += 1;
+                }
+                matches.push(SearchMatch {
+                    path: rel.to_string(),
+                    line: (line_index + 1) as u32,
+                    column,
+                    text: clip_line(line),
+                });
+                if matches.len() >= MAX_SEARCH_HITS {
+                    truncated = true;
+                    limit_reached = true;
+                    break;
+                }
+            }
+            if limit_reached {
+                break;
+            }
+        }
+        if limit_reached {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        }
+    })?;
+    truncated |= walk_truncated;
+
+    matches.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.column.cmp(&right.column))
+    });
+    Ok(SearchResults { matches, truncated })
+}
+
+/// Workspace-relative file paths that match every whitespace-separated token of
+/// `query` (case-insensitive, like Orca's Explorer name filter), under the same
+/// ignore rules and bounds as content search. Dotfiles are only listed when
+/// `include_dotfiles` is set. A blank query lists everything.
+pub fn find_files(
+    root: &Path,
+    query: &str,
+    include_dotfiles: bool,
+) -> Result<FileList, String> {
+    if query.len() > FILE_NAME_FILTER_QUERY_MAX_BYTES {
+        return Err("The file name filter is too long".to_string());
+    }
+    let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut paths: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let walk_truncated = walk_files(root, |_, rel, _| {
+        if !include_dotfiles && rel.split('/').any(|segment| segment.starts_with('.')) {
+            return Flow::Continue;
+        }
+        let haystack = rel.to_lowercase();
+        if !tokens.iter().all(|token| haystack.contains(token)) {
+            return Flow::Continue;
+        }
+        if paths.len() >= MAX_FIND_FILES {
+            truncated = true;
+            return Flow::Stop;
+        }
+        paths.push(rel.to_string());
+        Flow::Continue
+    })?;
+    paths.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    Ok(FileList {
+        paths,
+        truncated: truncated || walk_truncated,
+    })
+}
+
+/// What a visitor wants the walk to do after a file.
+enum Flow {
+    Continue,
+    Stop,
+}
+
+/// Depth-first walk of regular files under Git/`.ignore` rules with the shared
+/// directory bound. `visit` gets the absolute path, the workspace-relative
+/// slash path and the directory entry. Returns whether the directory bound cut
+/// the walk short.
+fn walk_files<F>(root: &Path, mut visit: F) -> Result<bool, String>
+where
+    F: FnMut(&Path, &str, &fs::DirEntry) -> Flow,
+{
+    let root = canonical_root(root)?;
 
     // `.gitignore`, `.git/info/exclude` and the global excludes file only
     // apply inside a work tree. `.ignore` applies everywhere, like ripgrep.
@@ -65,11 +220,8 @@ pub fn search(root: &Path, query: &str, case_sensitive: bool) -> Result<SearchRe
     let mut ignore_layers: Vec<Gitignore> = Vec::new();
     let mut gitignore_layers: Vec<Gitignore> = Vec::new();
     let mut frames: Vec<Frame> = Vec::new();
-    let mut matches: Vec<SearchMatch> = Vec::new();
     let mut truncated = false;
-    let mut candidates = 0usize;
     let mut directories = 1usize;
-    let mut scanned_bytes = 0u64;
 
     if let Some(frame) = open_frame(
         &root,
@@ -129,20 +281,21 @@ pub fn search(root: &Path, query: &str, case_sensitive: bool) -> Result<SearchRe
             continue;
         }
 
+        let rel = {
+            let prefix = frames[index].rel.as_str();
+            if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            }
+        };
+
         if is_dir {
             if directories >= MAX_SEARCH_DIRECTORIES {
                 truncated = true;
                 break 'walk;
             }
             directories += 1;
-            let rel = {
-                let prefix = frames[index].rel.as_str();
-                if prefix.is_empty() {
-                    name
-                } else {
-                    format!("{prefix}/{name}")
-                }
-            };
             if let Some(frame) = open_frame(
                 &root,
                 path,
@@ -157,97 +310,11 @@ pub fn search(root: &Path, query: &str, case_sensitive: bool) -> Result<SearchRe
             continue;
         }
 
-        candidates += 1;
-        if candidates > MAX_SEARCH_CANDIDATES {
-            truncated = true;
-            break 'walk;
-        }
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        if metadata.len() > MAX_TEXT_BYTES {
-            truncated = true;
-            continue;
-        }
-        if metadata.len() > MAX_SEARCH_BYTES.saturating_sub(scanned_bytes) {
-            truncated = true;
-            break 'walk;
-        }
-        let bytes = match read_bounded(&path, "search candidate") {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                truncated = true;
-                continue;
-            }
-        };
-        scanned_bytes += bytes.len() as u64;
-        if bytes.len() as u64 > MAX_TEXT_BYTES {
-            truncated = true;
-            continue;
-        }
-        if bytes.contains(&0) {
-            continue;
-        }
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-
-        let rel = {
-            let prefix = frames[index].rel.as_str();
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
-            }
-        };
-
-        let mut limit_reached = false;
-        for (line_index, line) in text.lines().enumerate() {
-            // One forward scan over the line keeps Unicode columns exact and
-            // avoids re-counting the prefix for every match on a huge line.
-            let mut characters = line.char_indices().peekable();
-            let mut column = 1u32;
-            for found in pattern.find_iter(line) {
-                while let Some(&(byte_index, _)) = characters.peek() {
-                    if byte_index >= found.start() {
-                        break;
-                    }
-                    characters.next();
-                    column += 1;
-                }
-                matches.push(SearchMatch {
-                    path: rel.clone(),
-                    line: (line_index + 1) as u32,
-                    column,
-                    text: clip_line(line),
-                });
-                if matches.len() >= MAX_SEARCH_HITS {
-                    truncated = true;
-                    limit_reached = true;
-                    break;
-                }
-            }
-            if limit_reached {
-                break;
-            }
-        }
-        if limit_reached {
+        if let Flow::Stop = visit(&path, &rel, &entry) {
             break 'walk;
         }
     }
-
-    matches.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.line.cmp(&right.line))
-            .then_with(|| left.column.cmp(&right.column))
-    });
-    Ok(SearchResults { matches, truncated })
+    Ok(truncated)
 }
 
 /* ------------------------------------------------------------------------- */

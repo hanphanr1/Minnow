@@ -44,6 +44,7 @@
     onRefresh,
     onOpenDiff,
     onOpenFile,
+    onOpenEditor,
     onSelect,
     onClose
   }: {
@@ -54,6 +55,7 @@
     onRefresh: () => void;
     onOpenDiff: (path?: string, staged?: boolean) => void;
     onOpenFile: (path: string, line?: number) => void;
+    onOpenEditor?: () => void;
     onSelect: (id: string) => void;
     onClose: () => void;
   } = $props();
@@ -241,20 +243,12 @@
           Open Source Control
         </button>
       </div>
-    {:else if panel === 'search'}
-      {#if !worker}
-        <div class="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-xs text-muted-foreground">
-          Select a workspace to search files
-        </div>
-      {:else}
-        <ExplorerPane {worker} mode="search" {onOpenFile} />
-      {/if}
     {:else if !worker}
       <div class="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-xs text-muted-foreground">
-        Select a workspace to browse files
+        {panel === 'search' ? 'Select a workspace to search' : 'Select a workspace to browse files'}
       </div>
     {:else}
-      <ExplorerPane {worker} mode="explorer" {onOpenFile} />
+      <ExplorerPane {worker} view={panel === 'search' ? 'search' : 'files'} onView={(value) => onPanel(value === 'search' ? 'search' : 'explorer')} {onOpenFile} {onOpenEditor} />
     {/if}
   </div>
 

@@ -77,6 +77,12 @@ pub struct SearchResults {
     pub truncated: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FileList {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
 #[derive(Serialize)]
 pub struct GitFileChange {
     pub path: String,
@@ -533,6 +539,10 @@ pub fn search(root: &Path, query: &str, case_sensitive: bool) -> Result<SearchRe
     search_impl::search(root, query, case_sensitive)
 }
 
+pub fn find_files(root: &Path, query: &str, include_dotfiles: bool) -> Result<FileList, String> {
+    search_impl::find_files(root, query, include_dotfiles)
+}
+
 /* ------------------------------------------------------------------------- */
 /* git status and history                                                    */
 /* ------------------------------------------------------------------------- */
@@ -653,6 +663,47 @@ fn read_status(root: &Path) -> Result<GitStatus, String> {
         unstaged,
         untracked,
     })
+}
+
+/// The subset of `paths` (workspace-relative, forward slashes) that Git ignores.
+/// Paths are literal; the answer reflects `.gitignore`, `info/exclude` and the
+/// global excludes file exactly as Git applies them. A non-Git folder has no
+/// ignore rules, so nothing is reported.
+pub fn git_ignored_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, String> {
+    const MAX_PATHS: usize = 5000;
+    const CHUNK: usize = 200;
+    if paths.len() > MAX_PATHS {
+        return Err(format!("cannot check more than {MAX_PATHS} paths for ignore rules at once"));
+    }
+    let root = canonical_root(root)?;
+    let mut cleaned = Vec::with_capacity(paths.len());
+    for raw in paths {
+        cleaned.push(path_segments(raw)?.join("/"));
+    }
+    let mut ignored = Vec::new();
+    for chunk in cleaned.chunks(CHUNK) {
+        let mut args: Vec<&str> = vec!["check-ignore", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let output = git::git_at(Some(root.as_path()), &args)?;
+        match output.code {
+            // 0: at least one path is ignored; 1: none is.
+            // Git quotes names with quotes or backslashes; those cannot be matched back
+            // to a request path, so only exact echoes of requested paths are reported.
+            Some(0) => ignored.extend(
+                output.stdout.lines().filter(|line| chunk.iter().any(|path| path == line)).map(str::to_owned),
+            ),
+            Some(1) => {}
+            // 128 outside a repository: there are no ignore rules to apply.
+            Some(128) if output.stderr.contains("not a git repository") => return Ok(Vec::new()),
+            _ => {
+                return Err(format!(
+                    "cannot inspect ignore rules: {}",
+                    output.stderr.trim()
+                ))
+            }
+        }
+    }
+    Ok(ignored)
 }
 
 pub fn git_status(root: &Path) -> Result<GitStatus, String> {

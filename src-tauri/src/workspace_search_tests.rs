@@ -259,3 +259,41 @@ fn literal_search_reports_unicode_columns_clips_lines_and_skips_binary() {
         .expect("an empty query must be rejected");
     assert!(empty.contains("empty"));
 }
+
+#[test]
+fn find_files_matches_every_token_under_ignore_rules() {
+    let directory = repository();
+    let root = directory.path();
+    write(root, ".gitignore", "build/\n");
+    write(root, "src/App.svelte", "a");
+    write(root, "src/ui/Explorer.svelte", "b");
+    write(root, "docs/Guide.md", "c");
+    write(root, "build/App.svelte", "ignored");
+    write(root, ".env", "dot");
+    write(root, "src/.hidden/x.txt", "dot");
+
+    let all = find_files(root, "", false).unwrap();
+    assert_eq!(
+        all.paths,
+        ["docs/Guide.md", "fixture-global-ignore", "src/App.svelte", "src/ui/Explorer.svelte"]
+    );
+    assert!(!all.truncated);
+
+    // Tokens are case-insensitive and may match anywhere in the relative path.
+    let tokens = find_files(root, "  SRC   svelte ", false).unwrap();
+    assert_eq!(tokens.paths, ["src/App.svelte", "src/ui/Explorer.svelte"]);
+    assert!(find_files(root, "src nomatch", false).unwrap().paths.is_empty());
+
+    // Dotfiles, including dot directories, only appear when asked for.
+    let dotted = find_files(root, "", true).unwrap();
+    assert!(dotted.paths.contains(&".env".to_string()));
+    assert!(dotted.paths.contains(&"src/.hidden/x.txt".to_string()));
+    assert!(!dotted.paths.iter().any(|path| path.starts_with("build/")));
+}
+
+#[test]
+fn find_files_refuses_an_oversized_query() {
+    let directory = repository();
+    let error = find_files(directory.path(), &"a".repeat(2049), false).unwrap_err();
+    assert!(error.contains("too long"), "{error}");
+}
