@@ -102,6 +102,27 @@ Store original Orca captures, Minnow captures and labelled side-by-side composit
 
 Main comparisons cover landing, project addition, workspace creation, palette, terminal tabs, split terminals, split tab groups, source control, dark/light diffs, dark/light appearance settings, terminal settings, shortcuts, and the excluded Tasks/Mobile shell pages.
 
+### Comparison index
+
+Originals are `orca-<screen>.png` and `minnow-<screen>.png` at 1440×900. Labelled composites retain both originals side by side. Content, version and excluded-service differences are noted in the captions.
+
+| Screen | Comparisons | Milestone |
+|---|---|---|
+| Landing and shared shell | [Dark](docs/parity/compare-landing-dark.png) | `24fcd27` |
+| Project admission | [Dark](docs/parity/compare-add-project-dark.png) | `547713e` |
+| Workspace composer | [Dark](docs/parity/compare-create-workspace-dark.png) | `e12e069` |
+| Workspace palette | [Dark](docs/parity/compare-workspace-palette-dark.png) | `28f1eae` |
+| Terminal tabs | [Dark](docs/parity/compare-terminal-tabs-dark.png) | `87151ec` |
+| Terminal panes | [Dark](docs/parity/compare-terminal-split-dark.png) | `69960c4` |
+| Split tab groups | [Dark](docs/parity/compare-tab-groups-dark.png) | `0a75c66` |
+| Source Control | [Dark](docs/parity/compare-source-control-dark.png) | `2713b17` |
+| Diff | [Dark](docs/parity/compare-diff-dark.png), [Light](docs/parity/compare-diff-light.png) | `724642f` |
+| Appearance | [Dark](docs/parity/compare-settings-appearance-dark.png), [Light](docs/parity/compare-settings-appearance-light.png) | `1740704` |
+| Terminal settings | [Dark](docs/parity/compare-settings-terminal-dark.png) | `2940940` |
+| Shortcuts | [Dark](docs/parity/compare-settings-shortcuts-dark.png) | `616356e` |
+| Excluded page frames | [Tasks](docs/parity/compare-tasks-dark.png), [Mobile](docs/parity/compare-mobile-dark.png) | `1037ad1` |
+
+
 ## Evidence
 
 Sixteen labelled comparisons and their original native captures are saved under `docs/parity/`. Orca captures come from the isolated installed 1.4.245 application; Minnow captures use the Tauri desktop in debug or release mode, not a browser mockup. Terminal fixtures are real Rust-owned ConPTY processes, not real omp inference sessions. Their output is deliberately distinguishable from the reference's PowerShell sessions.

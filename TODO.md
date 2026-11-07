@@ -19,8 +19,8 @@
 - [x] Render actual Git patches and preserve real restart/stop/editor/merge/delete callbacks.
 - [x] Keep excluded service-backed features as labelled shell-only pages.
 - [x] Keep Rust and `src/api.ts` contracts unchanged; exclude the pre-existing ConPTY fix from UI commits.
-- [ ] Finish desktop interaction proof and source/Minnow screen comparisons in `docs/parity/`.
-- [ ] Commit the verified screen milestones and update the handoff with the resulting revisions.
+- [x] Finish desktop interaction proof and 16 source/Minnow comparisons in `docs/parity/`.
+- [x] Commit the verified screen milestones and record their revisions in UI_PARITY.md.
 
 ## Existing native engine
 SQLite project/session/settings storage, worktrees, ConPTY, bounded output, status detection, notifications, worker actions, and saved-session relaunch remain the existing Rust implementation. UI work does not replace or re-certify that engine. `src-tauri/src/pty.rs` contains an earlier, separate startup-handshake fix.
@@ -28,7 +28,7 @@ SQLite project/session/settings storage, worktrees, ConPTY, bounded output, stat
 ## Release evidence
 - [x] Run frontend type checks and production builds during integration.
 - [x] Run `cargo check --locked` after the chrome/config changes.
-- [ ] Build and exercise the final packaged frontend in the release executable.
+- [x] Build and exercise the embedded frontend in the native release executable, including actual worker restore and close/reopen.
 - [ ] Measure the full release process tree with four actual idle omp workers.
 - [ ] Record real RAM numbers and accounting scope in README.md.
 
