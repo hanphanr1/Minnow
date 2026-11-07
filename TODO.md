@@ -39,7 +39,7 @@ The shell milestone is not complete Orca parity. The requested continuation incl
 - [x] Source-matched persistent Explorer Names/Contents strip, global filename filtering (native `find_workspace_files`), Git status/ignored decorations and dotfile/ignored toggles. Still open: file operations (new/rename/delete/drag), quick open and the row context menu.
 - [x] File and diff tabs inside workspace groups, with independent dirty-document ownership (per-tab CodeMirror editors kept alive while hidden, close/leave guards, persisted layout). Reopen of a closed document tab is not implemented.
 - [ ] Branch selection, nested workspaces, non-Git folder projects and attached worktrees.
-- [ ] Source-control conflicts/discard, history pagination, diff comments and split-open behavior.
+- [ ] Source-control conflicts, history pagination, diff comments and split-open behavior. Discard (tracked restore / untracked to trash, per file and per section, with confirmation) is done.
 - [ ] Editable keyboard shortcuts with one runtime binding registry and conflict detection.
 - [ ] Complete terminal/appearance/general settings and theme import/export.
 - [ ] Notification preferences, real activity history and agent attention routing.

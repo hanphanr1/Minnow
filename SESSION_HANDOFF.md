@@ -41,6 +41,18 @@ Native desktop run with an isolated copy of the verified pre-cutover SQLite (`.s
 
 Known limits: ConPTY forwarded OSC 7 in this environment, but a shell that never emits it keeps the fallback; the stale `current_cwd` of a stopped terminal is retained until it is restarted; Windows PowerShell (not pwsh) is the shell.
 
+## Milestones after the terminal cutover (each committed, each exercised natively)
+
+All exercised on the isolated debug desktop (`.smoke/terminal-state`, CDP 9226, Vite on 1420) with scripts in untracked `.smoke/*_smoke.py`; not yet a rebuilt release.
+
+- Explorer (`e8c0470`): Names/Contents switch, global Find files through native `find_workspace_files` (shares `walk_files` with content search), Git status/ignored decorations (`workspace_git_ignored`), dotfile/ignored toggles.
+- File and diff tabs (`cca7df5`): `WorkspaceTab.document`; per-tab CodeMirror kept alive while hidden; close/leave/window-close guards through `requestLeave`; diff tabs refresh on workspace changes.
+- Quick Open (`adcc69a`): Ctrl+P, Orca's fuzzy ranking, recents, `path:line`.
+- File operations (`476f0c0`): create/rename/delete(to trash)/reveal natives plus Explorer inline input and context menu; editors follow renames and close on delete.
+- Source Control discard: `discard_workspace_paths` (restore from index; untracked to trash) with confirmation, per file and per section.
+
+Known gaps of these slices: Explorer has no duplicate, drag-move/import or multi-select; a dirty editor is not preserved across a rename of its file; closed document tabs cannot be reopened; clipboard reads from automation trigger a WebView2 permission prompt (do not use `navigator.clipboard.readText()` in smoke scripts).
+
 ## Implemented frontend
 
 - Exact source theme tokens, Geist/Nerd fonts, Lucide geometry, 280px/350px reference sidebars, 36px Windows chrome, and 24px status bar.

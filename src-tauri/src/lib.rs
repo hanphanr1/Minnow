@@ -131,6 +131,11 @@ async fn unstage_workspace_paths(engine: State<'_, Engine>, worker_id: String, p
 }
 
 #[tauri::command]
+async fn discard_workspace_paths(engine: State<'_, Engine>, worker_id: String, tracked: Vec<String>, untracked: Vec<String>) -> Result<(), String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::discard_paths(root, &tracked, &untracked)).await
+}
+
+#[tauri::command]
 async fn commit_workspace(engine: State<'_, Engine>, worker_id: String, message: String) -> Result<String, String> {
     in_workspace(engine.inner().clone(), worker_id, move |root| workspace::commit(root, &message)).await
 }
@@ -314,7 +319,7 @@ pub fn run() {
             pick_project_folder, create_project, clone_project,
             list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace, find_workspace_files, create_workspace_entry, rename_workspace_entry, delete_workspace_entry, reveal_workspace_entry,
             workspace_git_status, workspace_git_ignored, workspace_git_history, stage_workspace_paths,
-            unstage_workspace_paths, commit_workspace, workspace_file_diff, watch_workspace
+            unstage_workspace_paths, discard_workspace_paths, commit_workspace, workspace_file_diff, watch_workspace
         ])
         .build(context)
         .expect("Could not start Minnow");

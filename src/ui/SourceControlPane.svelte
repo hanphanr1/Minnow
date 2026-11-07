@@ -10,6 +10,7 @@
     Minus,
     Plus,
     RefreshCw,
+    Undo2,
     X
   } from 'lucide-svelte';
   import type { Worker } from '../types';
@@ -17,6 +18,7 @@
     commitWorkspace,
     getWorkspaceGitStatus,
     getWorkspaceHistory,
+    discardWorkspacePaths,
     stageWorkspacePaths,
     unstageWorkspacePaths,
     workspaceChangedEvent,
@@ -250,6 +252,55 @@
     } finally {
       if (generationAtRequest === generation) actionBusy = null;
     }
+  }
+
+  // Discarding is destructive, so it always asks first.
+  let pendingDiscard = $state<{ title: string; message: string; tracked: string[]; untracked: string[]; label: string } | null>(null);
+  let discardDialog = $state<HTMLDialogElement | null>(null);
+
+  $effect(() => {
+    if (pendingDiscard && discardDialog && !discardDialog.open) discardDialog.showModal();
+    else if (!pendingDiscard && discardDialog?.open) discardDialog.close();
+  });
+
+  function requestDiscardEntry(entry: GitFileChange, sectionId: SectionId): void {
+    const untracked = sectionId === 'untracked';
+    pendingDiscard = {
+      title: untracked ? 'Delete untracked file' : 'Discard changes',
+      message: untracked
+        ? `Move ${baseName(entry.path)} to the trash? It is not in Git, so this is the only copy.`
+        : `Discard the unstaged changes to ${baseName(entry.path)}? Staged changes are kept.`,
+      tracked: untracked ? [] : [entry.path],
+      untracked: untracked ? [entry.path] : [],
+      label: baseName(entry.path)
+    };
+  }
+
+  function requestDiscardSection(section: StatusSection): void {
+    const entries = rawEntries(section.id);
+    if (!entries.length) return;
+    const untracked = section.id === 'untracked';
+    pendingDiscard = {
+      title: untracked ? 'Delete untracked files' : 'Discard all changes',
+      message: untracked
+        ? `Move ${entries.length} untracked ${entries.length === 1 ? 'file' : 'files'} to the trash? They are not in Git.`
+        : `Discard the unstaged changes to ${entries.length} ${entries.length === 1 ? 'file' : 'files'}? Staged changes are kept.`,
+      tracked: untracked ? [] : entries.map((entry) => entry.path),
+      untracked: untracked ? entries.map((entry) => entry.path) : [],
+      label: `${entries.length} ${entries.length === 1 ? 'file' : 'files'}`
+    };
+  }
+
+  function confirmDiscard(): void {
+    const current = pendingDiscard;
+    if (!current) return;
+    pendingDiscard = null;
+    void performAction(
+      `discard:${current.label}`,
+      `Discarded ${current.label}`,
+      'Discard',
+      () => discardWorkspacePaths(workerId, current.tracked, current.untracked)
+    );
   }
 
   function stageEntry(entry: GitFileChange): void {
@@ -636,6 +687,16 @@
                     <button
                       type="button"
                       class="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground disabled:opacity-50"
+                      aria-label={`Discard all in ${section.label}`}
+                      title={`Discard all in ${section.label}`}
+                      disabled={actionsLocked}
+                      onclick={() => requestDiscardSection(section)}
+                    >
+                      <Undo2 size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      class="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground disabled:opacity-50"
                       aria-label={`Stage all in ${section.label}`}
                       title={`Stage all in ${section.label}`}
                       disabled={actionsLocked}
@@ -717,6 +778,19 @@
                       {/if}
                     </button>
                   {:else}
+                    <button
+                      type="button"
+                      class="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground disabled:opacity-50"
+                      aria-label={`Discard ${entry.path}`}
+                      title={section.id === 'untracked' ? `Delete ${entry.path}` : `Discard changes to ${entry.path}`}
+                      disabled={actionsLocked}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        requestDiscardEntry(entry, section.id);
+                      }}
+                    >
+                      <Undo2 size={12} />
+                    </button>
                     <button
                       type="button"
                       class="inline-flex size-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground disabled:opacity-50"
@@ -836,3 +910,20 @@
     {/if}
   </div>
 </div>
+
+<dialog
+  bind:this={discardDialog}
+  class="mn-dialog"
+  aria-labelledby="discard-title"
+  oncancel={() => { pendingDiscard = null; }}
+  onclose={() => { pendingDiscard = null; }}
+>
+  {#if pendingDiscard}
+    <h2 id="discard-title">{pendingDiscard.title}</h2>
+    <p class="mt-3">{pendingDiscard.message}</p>
+    <div class="mt-6 flex justify-end gap-2">
+      <button type="button" class="mn-button" onclick={() => { pendingDiscard = null; }}>Cancel</button>
+      <button type="button" class="mn-button danger" onclick={confirmDiscard}>{pendingDiscard.untracked.length ? 'Move to Trash' : 'Discard'}</button>
+    </div>
+  {/if}
+</dialog>

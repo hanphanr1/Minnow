@@ -1009,6 +1009,25 @@ pub fn unstage_paths(root: &Path, paths: Option<Vec<String>>) -> Result<(), Stri
     run_git(&root, &args, "cannot unstage the selected paths")
 }
 
+/// Throws away working-tree changes. `tracked` paths are restored from the
+/// index (staged work is kept); `untracked` paths are moved to the system trash,
+/// so even an untracked file can be recovered from there.
+pub fn discard_paths(root: &Path, tracked: &[String], untracked: &[String]) -> Result<(), String> {
+    let root = canonical_root(root)?;
+    let tracked = literal_paths(tracked)?;
+    let untracked = literal_paths(untracked)?;
+    if !tracked.is_empty() {
+        let _guard = mutation_guard();
+        let mut args: Vec<String> = vec!["--literal-pathspecs".into(), "restore".into(), "--worktree".into(), "--".into()];
+        args.extend(tracked);
+        run_git(&root, &args, "cannot discard the selected changes")?;
+    }
+    for path in &untracked {
+        delete_entry(&root, path)?;
+    }
+    Ok(())
+}
+
 /// Creates a commit with the caller's message, respecting repository identity,
 /// hooks, and signing configuration. Returns the new full commit hash.
 pub fn commit(root: &Path, message: &str) -> Result<String, String> {

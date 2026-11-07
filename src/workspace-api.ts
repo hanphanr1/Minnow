@@ -68,6 +68,10 @@ export function stageWorkspacePaths(workerId: string, paths: string[] | null): P
 export function unstageWorkspacePaths(workerId: string, paths: string[] | null): Promise<void> {
   return invoke('unstage_workspace_paths', { workerId, paths });
 }
+/** Restores `tracked` from the index and trashes `untracked`; staged work is kept. */
+export function discardWorkspacePaths(workerId: string, tracked: string[], untracked: string[]): Promise<void> {
+  return invoke('discard_workspace_paths', { workerId, tracked, untracked });
+}
 export function commitWorkspace(workerId: string, message: string): Promise<string> {
   return invoke('commit_workspace', { workerId, message });
 }

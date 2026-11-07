@@ -202,3 +202,34 @@ fn create_rename_delete_stay_inside_the_workspace() {
     delete_entry(root, "src/renamed.txt").unwrap();
     assert!(!root.join("src/renamed.txt").exists());
 }
+
+#[test]
+fn discard_restores_tracked_files_and_trashes_untracked_ones() {
+    let directory = repository();
+    let root = directory.path();
+    fs::write(root.join("tracked.txt"), "original\n").unwrap();
+    git::git_ok(Some(root), &["add", "tracked.txt"], "stage fixture").unwrap();
+    git::git_ok(Some(root), &["commit", "-m", "add tracked"], "commit fixture").unwrap();
+
+    fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+    fs::write(root.join("new.txt"), "scratch\n").unwrap();
+    discard_paths(root, &["tracked.txt".to_string()], &["new.txt".to_string()]).unwrap();
+    // Git may check files out with CRLF (core.autocrlf), so compare the text, not the line ending.
+    let text = |name: &str| fs::read_to_string(root.join(name)).unwrap().replace("\r\n", "\n");
+    assert_eq!(text("tracked.txt"), "original\n");
+    assert!(!root.join("new.txt").exists());
+
+    // Staged work survives a discard of the later working-tree edit.
+    fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+    git::git_ok(Some(root), &["add", "tracked.txt"], "stage edit").unwrap();
+    fs::write(root.join("tracked.txt"), "later\n").unwrap();
+    discard_paths(root, &["tracked.txt".to_string()], &[]).unwrap();
+    assert_eq!(text("tracked.txt"), "staged\n");
+
+    // A deleted tracked file comes back; escapes are refused.
+    fs::remove_file(root.join("tracked.txt")).unwrap();
+    discard_paths(root, &["tracked.txt".to_string()], &[]).unwrap();
+    assert!(root.join("tracked.txt").is_file());
+    assert!(discard_paths(root, &["../x".to_string()], &[]).is_err());
+    assert!(discard_paths(root, &[], &["../x".to_string()]).is_err());
+}
