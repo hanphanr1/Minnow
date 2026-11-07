@@ -1,5 +1,7 @@
 # Minnow milestones
 
+Current state: paused at the user's request for agent handoff. Verified/pushed code checkpoint: `1f4746c`. A partial terminalId frontend migration remains in the working tree; Workspace/App and native code are not integrated, so this is not a green feature milestone. Resume instructions and exact file inventory: SESSION_HANDOFF.md; copy-ready prompt: CONTINUE_PROMPT.md; terminal contract: TERMINAL_CUTOVER.md. All unchecked parity work below remains open.
+
 ## Reference and identity
 - [x] Clone Orca into `_ref/orca`; pin the revision and MIT license.
 - [x] Trace worktrees, PTYs, status, notifications, resume, and layout in REFERENCE.md.

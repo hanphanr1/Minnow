@@ -203,3 +203,9 @@ The additional installed-Orca capture [Editor and Explorer](docs/parity/orca-fun
 
 Review corrections: staging a renamed destination no longer stages unrelated content recreated at its old index pathname; untracked symlink diffs show the link value/mode instead of reading target contents; ignore-file parsing has independent byte/rule budgets, including nested and global/exclude rules. Saves recheck revision/type/path immediately before replacement, with the remaining cross-process rename race still explicitly not claimed atomic. Native close acceptance requires `core:window:allow-destroy`, because Tauri's `onCloseRequested` wrapper itself calls `destroy()` after an unprevented callback. Ctrl+Shift+Backspace now goes through the same file-leave guard as the normal delete action; an independently removed workspace retains the draft with an explicit recovery warning rather than silently dropping it.
 
+## Paused terminal-identity cutover
+
+The user requested a pause and agent handoff after verified/pushed milestone `1f4746c`. Six frontend files now contain an unverified partial terminalId migration. Workspace.svelte and App.svelte remain on the old model; Rust has not been migrated. The working tree is known incomplete and is not covered by the earlier passing checks or captures. No new terminal parity is claimed.
+
+Resume from SESSION_HANDOFF.md, CONTINUE_PROMPT.md and TERMINAL_CUTOVER.md. TODO.md retains every open feature family. The exact partial source diff is backed up under `.smoke/checkpoints/terminal-cutover-paused.patch`; do not apply it again to the already-modified tree.
+
