@@ -4,6 +4,7 @@ mod process_tree;
 mod pty;
 mod storage;
 mod projects;
+mod sessions;
 mod workspace;
 mod workspace_watch;
 
@@ -174,6 +175,24 @@ fn show_notification(engine: State<'_, Engine>, title: String, body: String) {
 }
 
 #[tauri::command]
+async fn list_agent_sessions(engine: State<'_, Engine>) -> Result<Vec<sessions::SessionSummary>, String> {
+    let engine = engine.inner().clone();
+    blocking(move || Ok(sessions::list(&engine.session_sources()))).await
+}
+
+#[tauri::command]
+async fn read_agent_session(engine: State<'_, Engine>, path: String) -> Result<Vec<sessions::SessionMessage>, String> {
+    let engine = engine.inner().clone();
+    blocking(move || sessions::read(&engine.session_sources(), &path)).await
+}
+
+#[tauri::command]
+async fn search_agent_sessions(engine: State<'_, Engine>, query: String) -> Result<Vec<sessions::SessionHit>, String> {
+    let engine = engine.inner().clone();
+    blocking(move || Ok(sessions::search(&engine.session_sources(), &query))).await
+}
+
+#[tauri::command]
 async fn bootstrap(engine: State<'_, Engine>) -> Result<Snapshot, String> {
     let engine = engine.inner().clone();
     blocking(move || engine.snapshot()).await
@@ -317,7 +336,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bootstrap, show_notification, add_project, create_workers, restart_worker, kill_worker,
+            bootstrap, show_notification, list_agent_sessions, read_agent_session, search_agent_sessions, add_project, create_workers, restart_worker, kill_worker,
             delete_worker, diff_worker, merge_worker, open_editor, save_settings,
             create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,

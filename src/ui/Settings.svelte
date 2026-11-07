@@ -23,7 +23,9 @@
   import UnavailablePane from './settings/UnavailablePane.svelte';
   import QuickCommandsPane from './settings/QuickCommandsPane.svelte';
   import NotificationsPane from './settings/NotificationsPane.svelte';
-  import type { Project } from '../types';
+  import SessionHistoryPane from './settings/SessionHistoryPane.svelte';
+  import StatsPane from './settings/StatsPane.svelte';
+  import type { Project, TerminalSession, Worker } from '../types';
 
   let {
     settings,
@@ -32,7 +34,10 @@
     onPreferences,
     onBack,
     initialSection,
-    projects = []
+    projects = [],
+    workers = [],
+    terminals = [],
+    onOpenTerminal
   }: {
     settings: AppSettings;
     preferences: UiPreferences;
@@ -41,6 +46,9 @@
     onBack: () => void;
     initialSection?: string;
     projects?: Project[];
+    workers?: Worker[];
+    terminals?: TerminalSession[];
+    onOpenTerminal?: (workerId: string, terminalId: string) => void;
   } = $props();
 
   // Deep links only choose the opening section; later navigation owns activeSectionId.
@@ -177,6 +185,10 @@
                 <TerminalPane {preferences} {onPreferences} {query} />
               {:else if section.id === 'general'}
                 <GeneralPane {settings} {onSave} {query} />
+              {:else if section.id === 'session-history'}
+                <SessionHistoryPane {workers} {onOpenTerminal} />
+              {:else if section.id === 'stats'}
+                <StatsPane {workers} {terminals} />
               {:else if section.id === 'notifications'}
                 <NotificationsPane {query} />
               {:else if section.id === 'quick-commands'}

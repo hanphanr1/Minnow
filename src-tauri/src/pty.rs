@@ -757,6 +757,17 @@ impl Manager {
         Ok(self.session(id)?.terminal.lock().unwrap().current_cwd.clone().unwrap_or_default())
     }
 
+    /// Session directories of every agent terminal (closed ones too: their history stays).
+    pub fn session_sources(&self) -> Vec<crate::sessions::SessionSource> {
+        self.ordered_sessions(None).iter().map(|session| session.terminal())
+            .filter(|terminal| terminal.kind == KIND_AGENT)
+            .map(|terminal| crate::sessions::SessionSource {
+                worker_id: terminal.worker_id, terminal_id: terminal.id, terminal_name: terminal.name,
+                dir: PathBuf::from(terminal.session_path),
+            })
+            .collect()
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), String> {
         let _operation = self.operations.lock().unwrap();
         let worker = self.worker(id)?;

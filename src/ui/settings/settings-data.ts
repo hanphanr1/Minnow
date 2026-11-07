@@ -239,7 +239,7 @@ export const NAV_SECTIONS: NavSection[] = [
       'Search everything your agents have said and done, on this computer and on any paired Orca server.',
     icon: History,
     keywords: ['session', 'history', 'search', 'transcript', 'agent'],
-    implemented: false,
+    implemented: true,
     includes: ['Session indexing', 'Search across paired servers', 'Index maintenance']
   },
   {
@@ -405,7 +405,7 @@ export const NAV_SECTIONS: NavSection[] = [
       'Orca stats plus Claude, Codex, OpenCode, Muse token analytics and Grok subscription usage.',
     icon: BarChart3,
     keywords: ['stats', 'usage', 'tokens', 'analytics', 'grok', 'subscription'],
-    implemented: false,
+    implemented: true,
     includes: ['Token analytics', 'Subscription usage', 'Usage retention']
   },
   {

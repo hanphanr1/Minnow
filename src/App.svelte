@@ -43,7 +43,7 @@
   let quickOpenOpen = $state(false);
   let confirmDialog = $state<HTMLDialogElement>();
   let confirm = $state<{action:'merge'|'delete';worker:Worker;busy:boolean;error:string|null}|null>(null);
-  type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void; initialSection?: string; projects?: Project[] };
+  type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void; initialSection?: string; projects?: Project[]; workers?: Worker[]; terminals?: TerminalSession[]; onOpenTerminal?: (workerId: string, terminalId: string) => void };
   let settingsSection = $state<string|undefined>(undefined);
   let SettingsView = $state<Component<SettingsViewProps>|null>(null);
   let settingsLoading = $state(false);
@@ -179,6 +179,12 @@
     page = 'terminal';
     await tick();
     workspace?.openDocument(document);
+  }
+  async function openTerminalFrom(target:Worker,terminalId:string) {
+    page = 'terminal';
+    await select(target.project_id,target.id);
+    await tick();
+    workspace?.activateTerminal(terminalId);
   }
   async function openActivity(event:ActivityEvent) {
     if (!workers.some(w => w.id === event.workerId)) return;
@@ -360,7 +366,7 @@
 <div class="app-layout">
   {#if page === 'settings'}
     {#if SettingsView}
-      <SettingsView {settings} {preferences} initialSection={settingsSection} {projects} onSave={async value => { settings = await saveSettings(value); }} onPreferences={changePreferences} onBack={closeSettings} />
+      <SettingsView {settings} {preferences} initialSection={settingsSection} {projects} {workers} {terminals} onOpenTerminal={(workerId,terminalId) => { const target = workers.find(w => w.id === workerId); if (target) void openTerminalFrom(target,terminalId); }} onSave={async value => { settings = await saveSettings(value); }} onPreferences={changePreferences} onBack={closeSettings} />
     {:else}
       <div class="flex h-full min-h-0 flex-1 flex-col bg-background">
         <div class="titlebar shrink-0" data-tauri-drag-region>
