@@ -42,6 +42,20 @@ export function findWorkspaceFiles(workerId: string, query: string, includeDotfi
 export function getWorkspaceGitIgnored(workerId: string, paths: string[]): Promise<string[]> {
   return invoke('workspace_git_ignored', { workerId, paths });
 }
+/** Creates an empty file or folder; never overwrites. Returns the workspace-relative path. */
+export function createWorkspaceEntry(workerId: string, path: string, isDir: boolean): Promise<string> {
+  return invoke('create_workspace_entry', { workerId, path, isDir });
+}
+export function renameWorkspaceEntry(workerId: string, from: string, to: string): Promise<string> {
+  return invoke('rename_workspace_entry', { workerId, from, to });
+}
+/** Moves the entry to the system trash. */
+export function deleteWorkspaceEntry(workerId: string, path: string): Promise<void> {
+  return invoke('delete_workspace_entry', { workerId, path });
+}
+export function revealWorkspaceEntry(workerId: string, path: string): Promise<void> {
+  return invoke('reveal_workspace_entry', { workerId, path });
+}
 export function getWorkspaceGitStatus(workerId: string): Promise<GitStatus> {
   return invoke('workspace_git_status', { workerId });
 }
@@ -65,6 +79,13 @@ export function getWorkspaceFileDiff(workerId: string, path: string, staged = fa
 export const workspaceChangedEvent = 'minnow-workspace-changed';
 export function announceWorkspaceChange(workerId: string): void {
   window.dispatchEvent(new CustomEvent(workspaceChangedEvent, { detail: workerId }));
+}
+
+// A rename or delete announces which path moved so open editors can follow or close.
+export const workspacePathMovedEvent = 'minnow-workspace-path-moved';
+export interface PathMoved { workerId: string; from: string; to: string | null }
+export function announcePathMoved(detail: PathMoved): void {
+  window.dispatchEvent(new CustomEvent(workspacePathMovedEvent, { detail }));
 }
 
 export function pickProjectFolder(): Promise<string | null> {

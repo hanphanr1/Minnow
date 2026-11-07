@@ -529,6 +529,137 @@ pub fn write_file(root: &Path, path: &str, content: &str, revision: &str) -> Res
 }
 
 /* ------------------------------------------------------------------------- */
+/* file operations                                                           */
+/* ------------------------------------------------------------------------- */
+
+/// Creates an empty file or a folder at `path`. The parent folder must already
+/// exist and nothing may be there: creating never overwrites.
+pub fn create_entry(root: &Path, path: &str, is_dir: bool) -> Result<String, String> {
+    let root = canonical_root(root)?;
+    let resolved = resolve_mutable(&root, path)?;
+    let parent = resolved.full.parent().ok_or("a parent folder is required")?;
+    if !parent.is_dir() {
+        return Err(format!("the folder for {} does not exist", resolved.relative));
+    }
+    let _guard = mutation_guard();
+    if is_dir {
+        fs::create_dir(&resolved.full)
+    } else {
+        fs::OpenOptions::new().write(true).create_new(true).open(&resolved.full).map(|_| ())
+    }
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("{} already exists", resolved.relative)
+        } else {
+            format!("cannot create {}: {error}", resolved.relative)
+        }
+    })?;
+    Ok(resolved.relative)
+}
+
+/// Renames or moves a file or folder inside the workspace. The destination must
+/// not exist (a case-only rename of the same entry is allowed), a folder cannot
+/// move into itself, and the workspace root cannot be renamed.
+pub fn rename_entry(root: &Path, from: &str, to: &str) -> Result<String, String> {
+    let root = canonical_root(root)?;
+    let source = resolve_existing(&root, from)?;
+    if source.relative.is_empty() {
+        return Err("the workspace root cannot be renamed".to_string());
+    }
+    let target = resolve_mutable(&root, to)?;
+    if target.relative == source.relative {
+        return Ok(target.relative);
+    }
+    let same_entry_case_only = target.relative.eq_ignore_ascii_case(&source.relative)
+        && target.full.exists()
+        && fs::canonicalize(&target.full).ok() == fs::canonicalize(&source.full).ok();
+    if target.full.exists() && !same_entry_case_only {
+        return Err(format!("{} already exists", target.relative));
+    }
+    if source.full.is_dir()
+        && target.relative.to_lowercase().starts_with(&format!("{}/", source.relative.to_lowercase()))
+    {
+        return Err("a folder cannot be moved into itself".to_string());
+    }
+    let parent = target.full.parent().ok_or("a parent folder is required")?;
+    if !parent.is_dir() {
+        return Err(format!("the folder for {} does not exist", target.relative));
+    }
+    let _guard = mutation_guard();
+    fs::rename(&source.full, &target.full)
+        .map_err(|error| format!("cannot rename {} to {}: {error}", source.relative, target.relative))?;
+    Ok(target.relative)
+}
+
+/// Moves a file or folder to the system trash, so a delete can be undone from
+/// there. A symlink is trashed itself, never its target.
+pub fn delete_entry(root: &Path, path: &str) -> Result<(), String> {
+    let root = canonical_root(root)?;
+    let segments = path_segments(path)?;
+    if segments.is_empty() {
+        return Err("the workspace root cannot be deleted".to_string());
+    }
+    let relative = segments.join("/");
+    let full = joined(&root, &segments);
+    let metadata = fs::symlink_metadata(&full)
+        .map_err(|error| format!("{relative} is not accessible: {error}"))?;
+    if !metadata.file_type().is_symlink() {
+        let canonical = canonical_child(&full)?;
+        if !inside_workspace(&root, &canonical) {
+            return Err(format!("{relative} resolves outside the workspace"));
+        }
+    } else if let Some(parent) = full.parent() {
+        // A link leaf is removed as itself, but its folder must still be inside.
+        let canonical = canonical_child(parent)?;
+        if canonical != root && !inside_workspace(&root, &canonical) {
+            return Err(format!("{relative} is outside the workspace"));
+        }
+    }
+    let _guard = mutation_guard();
+    trash::delete(&full).map_err(|error| format!("cannot move {relative} to the trash: {error}"))
+}
+
+/// Shows a workspace entry in the system file manager. Returns once the
+/// manager was started; it is never waited for.
+pub fn reveal_entry(root: &Path, path: &str) -> Result<(), String> {
+    let root = canonical_root(root)?;
+    let resolved = if path_segments(path)?.is_empty() {
+        ResolvedPath { relative: String::new(), full: root.clone() }
+    } else {
+        resolve_existing(&root, path)?
+    };
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer.exe");
+        if resolved.relative.is_empty() {
+            command.arg(&resolved.full);
+        } else {
+            // `/select,` and the path are one argument; explorer rejects them split.
+            command.arg(format!("/select,{}", resolved.full.display()));
+        }
+        command.creation_flags(0x08000000);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(if resolved.full.is_dir() { resolved.full.clone() } else { resolved.full.parent().unwrap_or(&root).to_path_buf() });
+        command
+    };
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("cannot open the file manager: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/* ------------------------------------------------------------------------- */
 /* search                                                                    */
 /* ------------------------------------------------------------------------- */
 

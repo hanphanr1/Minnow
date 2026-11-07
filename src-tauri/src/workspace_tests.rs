@@ -170,3 +170,35 @@ fn ignored_paths_follow_gitignore_and_reject_unsafe_paths() {
     assert!(git_ignored_paths(root, &["../escape".to_string()]).is_err());
     assert!(git_ignored_paths(root, &["C:/x".to_string()]).is_err());
 }
+
+#[test]
+fn create_rename_delete_stay_inside_the_workspace() {
+    let directory = repository();
+    let root = directory.path();
+    fs::create_dir(root.join("src")).unwrap();
+
+    assert_eq!(create_entry(root, "src/new.txt", false).unwrap(), "src/new.txt");
+    assert!(root.join("src/new.txt").is_file());
+    assert_eq!(create_entry(root, "src/inner", true).unwrap(), "src/inner");
+    assert!(root.join("src/inner").is_dir());
+    assert!(create_entry(root, "src/new.txt", false).unwrap_err().contains("already exists"));
+    assert!(create_entry(root, "missing/dir/file.txt", false).unwrap_err().contains("does not exist"));
+    assert!(create_entry(root, "../escape.txt", false).is_err());
+    assert!(create_entry(root, ".git/config2", false).is_err());
+
+    assert_eq!(rename_entry(root, "src/new.txt", "src/renamed.txt").unwrap(), "src/renamed.txt");
+    assert!(!root.join("src/new.txt").exists() && root.join("src/renamed.txt").is_file());
+    fs::write(root.join("other.txt"), "x").unwrap();
+    assert!(rename_entry(root, "other.txt", "src/renamed.txt").unwrap_err().contains("already exists"));
+    assert!(rename_entry(root, "src", "src/inner/src").unwrap_err().contains("into itself"));
+    assert!(rename_entry(root, "other.txt", "../outside.txt").is_err());
+    assert!(rename_entry(root, "", "x").is_err());
+    // Case-only rename of the same entry is a real rename, not a collision.
+    assert_eq!(rename_entry(root, "other.txt", "Other.txt").unwrap(), "Other.txt");
+
+    assert!(delete_entry(root, "").is_err());
+    assert!(delete_entry(root, "../x").is_err());
+    assert!(delete_entry(root, "nope.txt").is_err());
+    delete_entry(root, "src/renamed.txt").unwrap();
+    assert!(!root.join("src/renamed.txt").exists());
+}

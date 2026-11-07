@@ -91,6 +91,26 @@ async fn workspace_git_ignored(engine: State<'_, Engine>, worker_id: String, pat
 }
 
 #[tauri::command]
+async fn create_workspace_entry(engine: State<'_, Engine>, worker_id: String, path: String, is_dir: bool) -> Result<String, String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::create_entry(root, &path, is_dir)).await
+}
+
+#[tauri::command]
+async fn rename_workspace_entry(engine: State<'_, Engine>, worker_id: String, from: String, to: String) -> Result<String, String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::rename_entry(root, &from, &to)).await
+}
+
+#[tauri::command]
+async fn delete_workspace_entry(engine: State<'_, Engine>, worker_id: String, path: String) -> Result<(), String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::delete_entry(root, &path)).await
+}
+
+#[tauri::command]
+async fn reveal_workspace_entry(engine: State<'_, Engine>, worker_id: String, path: String) -> Result<(), String> {
+    in_workspace(engine.inner().clone(), worker_id, move |root| workspace::reveal_entry(root, &path)).await
+}
+
+#[tauri::command]
 async fn workspace_git_status(engine: State<'_, Engine>, worker_id: String) -> Result<workspace::GitStatus, String> {
     in_workspace(engine.inner().clone(), worker_id, workspace::git_status).await
 }
@@ -292,7 +312,7 @@ pub fn run() {
             create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,
             pick_project_folder, create_project, clone_project,
-            list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace, find_workspace_files,
+            list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace, find_workspace_files, create_workspace_entry, rename_workspace_entry, delete_workspace_entry, reveal_workspace_entry,
             workspace_git_status, workspace_git_ignored, workspace_git_history, stage_workspace_paths,
             unstage_workspace_paths, commit_workspace, workspace_file_diff, watch_workspace
         ])

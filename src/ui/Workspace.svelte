@@ -31,6 +31,7 @@
   } from 'lucide-svelte';
   import type { Project, TerminalKind, TerminalSession, Worker } from '../types';
   import { errorMessage } from '../api';
+  import { workspacePathMovedEvent, type PathMoved } from '../workspace-api';
   import type { UiPreferences } from './preferences';
   import PaneTree from './PaneTree.svelte';
   import WorkspaceTabStrip from './WorkspaceTabStrip.svelte';
@@ -2023,10 +2024,31 @@
   });
 
 
+  /** Editors follow a renamed file and close for a deleted one (asking first if they are dirty). */
+  function onPathMoved(event: Event): void {
+    const detail = (event as CustomEvent<PathMoved>).detail;
+    if (!detail || detail.workerId !== worker.id) return;
+    let changed = false;
+    for (const tab of [...snapshot.tabs]) {
+      const document = tab.document;
+      if (!document || document.kind !== 'file') continue;
+      if (document.path !== detail.from && !document.path.startsWith(`${detail.from}/`)) continue;
+      if (detail.to === null) {
+        void closeTabNow(tab.id);
+      } else {
+        tab.document = { ...document, path: detail.to + document.path.slice(detail.from.length) };
+        changed = true;
+      }
+    }
+    if (changed) persist();
+  }
+
   onMount(() => {
+    window.addEventListener(workspacePathMovedEvent, onPathMoved);
     window.addEventListener('keyup', onWindowKeyup);
     window.addEventListener('blur', onWindowBlur);
     return () => {
+      window.removeEventListener(workspacePathMovedEvent, onPathMoved);
       window.removeEventListener('keyup', onWindowKeyup);
       window.removeEventListener('blur', onWindowBlur);
     };

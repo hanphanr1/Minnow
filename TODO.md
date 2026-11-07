@@ -35,7 +35,7 @@ The shell milestone is not complete Orca parity. The requested continuation incl
 - [x] Real staged/unstaged/untracked Git status, staging, commits and bounded history.
 - [x] Multiple independent terminals in the same worktree, including split cwd inheritance (OSC 7 only; see SESSION_HANDOFF.md for the Windows evidence).
 - [x] Native coalesced file-change invalidation for the visible workspace and Git index.
-- [ ] Quick open, file operations and remaining explorer interactions.
+- [x] Quick open (Ctrl+P) and Explorer file operations: new file/folder, rename (F2), delete to the system trash, copy path, reveal in File Explorer, context menu; open editors follow renames and close on delete. Still open: duplicate, drag-move/import, multi-select.
 - [x] Source-matched persistent Explorer Names/Contents strip, global filename filtering (native `find_workspace_files`), Git status/ignored decorations and dotfile/ignored toggles. Still open: file operations (new/rename/delete/drag), quick open and the row context menu.
 - [x] File and diff tabs inside workspace groups, with independent dirty-document ownership (per-tab CodeMirror editors kept alive while hidden, close/leave guards, persisted layout). Reopen of a closed document tab is not implemented.
 - [ ] Branch selection, nested workspaces, non-Git folder projects and attached worktrees.

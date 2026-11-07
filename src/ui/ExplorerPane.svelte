@@ -7,18 +7,30 @@
     CircleAlert,
     CircleSlash,
     Ellipsis,
+    Copy,
     ExternalLink,
+    FilePlus,
     Folder,
     FolderOpen,
+    FolderPlus,
+    FolderSearch,
     ListCollapse,
     ListFilter,
     Loader2,
+    Pencil,
     RefreshCw,
     Search,
+    Trash2,
     X
   } from 'lucide-svelte';
   import type { Worker } from '../types';
   import {
+    announcePathMoved,
+    announceWorkspaceChange,
+    createWorkspaceEntry,
+    deleteWorkspaceEntry,
+    renameWorkspaceEntry,
+    revealWorkspaceEntry,
     findWorkspaceFiles,
     getWorkspaceGitIgnored,
     getWorkspaceGitStatus,
@@ -113,6 +125,23 @@
   const prefsKey = (id: string): string => `minnow.explorer.view.${id}`;
   let showDotfiles = $state(true);
   let showIgnored = $state(true);
+
+  // File operations: an inline name field for new/rename, a context menu and a delete confirmation.
+  interface InlineEdit {
+    mode: 'file' | 'folder' | 'rename';
+    parent: string;
+    path: string;
+    value: string;
+    error: string | null;
+    busy: boolean;
+  }
+  interface MenuItem { label: string; icon?: typeof Pencil; danger?: boolean; disabled?: boolean; run: () => void; }
+  let inline = $state<InlineEdit | null>(null);
+  let inlineInput = $state<HTMLInputElement | null>(null);
+  let menu = $state<{ x: number; y: number; items: (MenuItem | 'separator')[] } | null>(null);
+  let menuEl = $state<HTMLDivElement | null>(null);
+  let pendingDelete = $state<{ row: ExplorerRow; busy: boolean; error: string | null } | null>(null);
+  let deleteDialog = $state<HTMLDialogElement | null>(null);
   let listEl = $state<HTMLDivElement | null>(null);
   let selectedPath = $state<string | null>(null);
   let focusIndex = $state(0);
@@ -325,6 +354,9 @@
     gitStatus = null;
     ignoredSet = new Set();
     ignoredAsked.clear();
+    inline = null;
+    menu = null;
+    pendingDelete = null;
     selectedPath = null;
     focusIndex = 0;
     refreshing = false;
@@ -447,6 +479,144 @@
     } catch {
       if (generationAtRequest === generation && requestedWorkerId === workerId) gitStatus = null;
     }
+  }
+
+  function absolutePath(relative: string): string {
+    const root = worker.path.replace(/[\\/]+$/, '');
+    return relative ? `${root}\\${relative.replace(/\//g, '\\')}` : root;
+  }
+
+  async function copyText(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // The menu already closed; a refused clipboard changes nothing else.
+    }
+  }
+
+  async function startNew(mode: 'file' | 'folder', parent: string): Promise<void> {
+    if (view !== 'files') return;
+    if (hasNameFilter) clearFilter();
+    if (parent && !expanded.has(parent)) {
+      expanded = new Set(expanded).add(parent);
+      void loadDirectory(workerId, parent, generation);
+    }
+    inline = { mode, parent, path: '', value: '', error: null, busy: false };
+    await tick();
+    inlineInput?.focus();
+  }
+
+  async function startRename(row: ExplorerRow): Promise<void> {
+    inline = { mode: 'rename', parent: dirName(row.path), path: row.path, value: row.entry.name, error: null, busy: false };
+    await tick();
+    if (!inlineInput) return;
+    inlineInput.focus();
+    const dot = row.entry.is_dir ? -1 : row.entry.name.lastIndexOf('.');
+    inlineInput.setSelectionRange(0, dot > 0 ? dot : row.entry.name.length);
+  }
+
+  function cancelInline(): void {
+    inline = null;
+  }
+
+  async function commitInline(): Promise<void> {
+    const current = inline;
+    if (!current || current.busy) return;
+    const name = current.value.trim();
+    if (!name) {
+      inline = null;
+      return;
+    }
+    if (/[\\/]/.test(name)) {
+      inline = { ...current, error: 'A name cannot contain slashes.' };
+      return;
+    }
+    const target = current.parent ? `${current.parent}/${name}` : name;
+    if (current.mode === 'rename' && target === current.path) {
+      inline = null;
+      return;
+    }
+    inline = { ...current, busy: true, error: null };
+    const requestedWorkerId = workerId;
+    try {
+      const created = current.mode === 'rename'
+        ? await renameWorkspaceEntry(requestedWorkerId, current.path, target)
+        : await createWorkspaceEntry(requestedWorkerId, target, current.mode === 'folder');
+      if (requestedWorkerId !== workerId) return;
+      inline = null;
+      selectedPath = created;
+      if (current.mode === 'rename') announcePathMoved({ workerId: requestedWorkerId, from: current.path, to: created });
+      announceWorkspaceChange(requestedWorkerId);
+      if (current.mode === 'file') onOpenFile(created);
+    } catch (error) {
+      if (requestedWorkerId !== workerId) return;
+      inline = { ...current, busy: false, error: errorMessage(error) };
+      await tick();
+      inlineInput?.focus();
+    }
+  }
+
+  function handleInlineKey(event: KeyboardEvent): void {
+    event.stopPropagation();
+    if (event.isComposing) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void commitInline();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelInline();
+    }
+  }
+
+  function requestDelete(row: ExplorerRow): void {
+    pendingDelete = { row, busy: false, error: null };
+  }
+
+  async function confirmDelete(): Promise<void> {
+    const current = pendingDelete;
+    if (!current || current.busy) return;
+    pendingDelete = { ...current, busy: true, error: null };
+    try {
+      await deleteWorkspaceEntry(workerId, current.row.path);
+      pendingDelete = null;
+      if (selectedPath === current.row.path) selectedPath = null;
+      announcePathMoved({ workerId, from: current.row.path, to: null });
+      announceWorkspaceChange(workerId);
+    } catch (error) {
+      pendingDelete = { ...current, busy: false, error: errorMessage(error) };
+    }
+  }
+
+  function targetFolder(row: ExplorerRow | null): string {
+    if (!row) return '';
+    return row.entry.is_dir ? row.path : dirName(row.path);
+  }
+
+  function openMenu(x: number, y: number, row: ExplorerRow | null): void {
+    if (view !== 'files') return;
+    const folder = targetFolder(row);
+    const items: (MenuItem | 'separator')[] = [];
+    if (row && !row.entry.is_dir) items.push({ label: 'Open', icon: ExternalLink, run: () => onOpenFile(row.path) });
+    if (row?.entry.is_dir) items.push({ label: row.expanded ? 'Collapse' : 'Expand', icon: ListCollapse, run: () => toggleDirectory(row) });
+    if (items.length) items.push('separator');
+    items.push({ label: 'New File...', icon: FilePlus, run: () => void startNew('file', folder) });
+    items.push({ label: 'New Folder...', icon: FolderPlus, run: () => void startNew('folder', folder) });
+    if (row) {
+      items.push('separator');
+      items.push({ label: 'Rename', icon: Pencil, run: () => void startRename(row) });
+      items.push({ label: 'Delete', icon: Trash2, danger: true, run: () => requestDelete(row) });
+      items.push('separator');
+      items.push({ label: 'Copy Path', icon: Copy, run: () => void copyText(absolutePath(row.path)) });
+      items.push({ label: 'Copy Relative Path', icon: Copy, run: () => void copyText(row.path) });
+    }
+    items.push('separator');
+    items.push({ label: 'Reveal in File Explorer', icon: FolderSearch, run: () => { void revealWorkspaceEntry(workerId, row?.path ?? '').catch(() => {}); } });
+    menu = {
+      x: Math.min(x, window.innerWidth - 232),
+      y: Math.min(y, window.innerHeight - items.length * 28 - 16),
+      items
+    };
+    void tick().then(() => menuEl?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus());
   }
 
   function runNameFilter(): void {
@@ -614,6 +784,21 @@
         event.preventDefault();
         activateRow(row);
         break;
+      case 'F2':
+        if (hasNameFilter) break;
+        event.preventDefault();
+        void startRename(row);
+        break;
+      case 'Delete':
+        event.preventDefault();
+        requestDelete(row);
+        break;
+      case 'ContextMenu': {
+        event.preventDefault();
+        const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+        openMenu(box.left + 24, box.bottom, row);
+        break;
+      }
     }
   }
 
@@ -859,6 +1044,32 @@
   $effect(() => {
     if (view !== 'search') return;
     void tick().then(() => searchInput?.focus());
+  });
+
+  $effect(() => {
+    if (!menu) return;
+    const close = (event: Event): void => {
+      if (event.target instanceof Node && menuEl?.contains(event.target)) return;
+      menu = null;
+    };
+    const key = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      menu = null;
+    };
+    window.addEventListener('pointerdown', close, true);
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('blur', () => { menu = null; }, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', close, true);
+      window.removeEventListener('keydown', key, true);
+    };
+  });
+
+  $effect(() => {
+    if (pendingDelete && deleteDialog && !deleteDialog.open) deleteDialog.showModal();
+    else if (!pendingDelete && deleteDialog?.open) deleteDialog.close();
   });
 
   $effect(() => {
@@ -1122,7 +1333,13 @@
         bind:this={listEl}
         class="min-h-0 flex-1 overflow-y-auto scrollbar-sleek"
         role="tree"
+        tabindex="-1"
         aria-label="Workspace files"
+        oncontextmenu={(event) => {
+          if (event.defaultPrevented) return;
+          event.preventDefault();
+          openMenu(event.clientX, event.clientY, null);
+        }}
       >
         {#if rootError && root}
           <div class="m-2 rounded-md border border-destructive/30 bg-destructive/5 p-2" role="alert">
@@ -1179,11 +1396,17 @@
           </div>
         {:else}
           <div class="py-1">
+            {#if inline && inline.mode !== 'rename' && inline.parent === ''}
+              {@render inlineRow(0)}
+            {/if}
             {#each rows as row, index (row.path)}
               {@const FileIcon = fileIconFor(row.path)}
               {@const nodeStatus = statusByPath.get(row.path) ?? null}
               {@const ignored = !nodeStatus && isIgnoredPath(row.path)}
               {@const statusColor = nodeStatus ? `var(--git-decoration-${nodeStatus})` : null}
+              {#if inline?.mode === 'rename' && inline.path === row.path}
+                {@render inlineRow(row.depth, row)}
+              {:else}
               <button
                 type="button"
                 role="treeitem"
@@ -1209,6 +1432,12 @@
                   activateRow(row);
                 }}
                 onkeydown={(event) => handleRowKey(event, index)}
+                oncontextmenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  selectedPath = row.path;
+                  openMenu(event.clientX, event.clientY, row);
+                }}
               >
                 {#if row.entry.is_dir}
                   <ChevronRight
@@ -1252,6 +1481,10 @@
                   />
                 {/if}
               </button>
+              {/if}
+              {#if inline && inline.mode !== 'rename' && row.entry.is_dir && inline.parent === row.path && row.expanded}
+                {@render inlineRow(row.depth + 1)}
+              {/if}
             {/each}
           </div>
           {#if hasNameFilter ? filterTruncated : root?.truncated}
@@ -1377,3 +1610,81 @@
     </div>
   </div>
 </div>
+
+{#snippet inlineRow(depth: number, renaming: ExplorerRow | null = null)}
+  <div class="px-2" style:padding-left={depth * 16 + 8 + 'px'}>
+    <div class="flex items-center gap-1 py-0.5">
+      <span class="size-3 shrink-0"></span>
+      {#if inline?.mode === 'folder' || renaming?.entry.is_dir}
+        <Folder size={12} class="shrink-0 text-muted-foreground" aria-hidden="true" />
+      {:else}
+        <FilePlus size={12} class="shrink-0 text-muted-foreground" aria-hidden="true" />
+      {/if}
+      <input
+        bind:this={inlineInput}
+        value={inline?.value ?? ''}
+        oninput={(event) => { if (inline) inline = { ...inline, value: event.currentTarget.value, error: null }; }}
+        onkeydown={handleInlineKey}
+        onblur={() => { if (inline && !inline.busy && !inline.error) void commitInline(); }}
+        disabled={inline?.busy}
+        spellcheck="false"
+        aria-label={inline?.mode === 'rename' ? 'Rename' : inline?.mode === 'folder' ? 'New folder name' : 'New file name'}
+        class="h-5 min-w-0 flex-1 rounded-sm border border-ring bg-background px-1 text-xs text-foreground outline-none"
+      />
+    </div>
+    {#if inline?.error}
+      <p class="pb-1 pl-4 text-[11px] text-destructive" role="alert">{inline.error}</p>
+    {/if}
+  </div>
+{/snippet}
+
+{#if menu}
+  <div
+    bind:this={menuEl}
+    role="menu"
+    tabindex="-1"
+    class="fixed z-[100] min-w-[13rem] rounded-[11px] border border-border/80 bg-popover p-1 text-popover-foreground shadow-[0_16px_36px_rgba(0,0,0,0.30)]"
+    style:left={`${menu.x}px`}
+    style:top={`${menu.y}px`}
+  >
+    {#each menu.items as item}
+      {#if item === 'separator'}
+        <div class="my-1 h-px bg-border"></div>
+      {:else}
+        {@const Icon = item.icon}
+        <button
+          type="button"
+          role="menuitem"
+          disabled={item.disabled}
+          class={`flex h-7 w-full items-center gap-2 rounded-sm px-2 text-left text-xs disabled:opacity-40 ${item.danger ? 'text-destructive hover:bg-destructive/10' : 'hover:bg-accent hover:text-accent-foreground'}`}
+          onclick={() => {
+            const run = item.run;
+            menu = null;
+            run();
+          }}
+        >
+          {#if Icon}<Icon size={14} class="shrink-0" />{:else}<span class="size-3.5 shrink-0"></span>{/if}
+          <span class="min-w-0 flex-1 truncate">{item.label}</span>
+        </button>
+      {/if}
+    {/each}
+  </div>
+{/if}
+
+<dialog
+  bind:this={deleteDialog}
+  class="mn-dialog"
+  aria-labelledby="explorer-delete-title"
+  oncancel={(event) => { if (pendingDelete?.busy) event.preventDefault(); else pendingDelete = null; }}
+  onclose={() => { if (!pendingDelete?.busy) pendingDelete = null; }}
+>
+  {#if pendingDelete}
+    <h2 id="explorer-delete-title">Delete {pendingDelete.row.entry.is_dir ? 'folder' : 'file'}</h2>
+    <p class="mt-3">Move <strong>{pendingDelete.row.entry.name}</strong> to the trash?{pendingDelete.row.entry.is_dir ? ' Everything inside it moves too.' : ''}</p>
+    {#if pendingDelete.error}<p class="mn-error mt-3" role="alert">{pendingDelete.error}</p>{/if}
+    <div class="mt-6 flex justify-end gap-2">
+      <button type="button" class="mn-button" disabled={pendingDelete.busy} onclick={() => { pendingDelete = null; }}>Cancel</button>
+      <button type="button" class="mn-button danger" disabled={pendingDelete.busy} onclick={() => void confirmDelete()}>{pendingDelete.busy ? 'Deleting…' : 'Move to Trash'}</button>
+    </div>
+  {/if}
+</dialog>
