@@ -12,8 +12,8 @@
   import WindowControls from './ui/WindowControls.svelte';
   import { loadPreferences, preferenceKey, type UiPreferences } from './ui/preferences';
   import type { Project, Settings, TerminalKind, TerminalSession, Worker } from './types';
-  import { bootstrap, closeTerminal, createTerminal as createTerminalApi, createWorkers, deleteWorker, diffWorker, errorMessage, isDesktop, killTerminal, killWorker, mergeWorker, openEditor, restartTerminal, restartWorker, saveSettings, subscribeTerminalEvents, subscribeWorkerEvents } from './api';
-  import { getWorkspaceFileDiff } from './workspace-api';
+  import type { TabDocument } from './ui/workspace-layout';
+  import { bootstrap, closeTerminal, createTerminal as createTerminalApi, createWorkers, deleteWorker, errorMessage, isDesktop, killTerminal, killWorker, mergeWorker, openEditor, restartTerminal, restartWorker, saveSettings, subscribeTerminalEvents, subscribeWorkerEvents } from './api';
   import { watchWorkspace } from './workspace-watch';
 
   type Action = 'restart' | 'stop' | 'editor' | 'diff' | 'merge' | 'delete';
@@ -39,35 +39,18 @@
   let projectOpen = $state(false);
   let confirmDialog = $state<HTMLDialogElement>();
   let confirm = $state<{action:'merge'|'delete';worker:Worker;busy:boolean;error:string|null}|null>(null);
-  let diff = $state<string|null>(null);
-  let diffLoading = $state(false);
-  let diffError = $state<string|null>(null);
-  let diffWorkerId = $state<string|null>(null);
-  let diffOpen = $state(false);
-  let diffRequest = $state<{workerId:string;path:string;staged:boolean}|null>(null);
-  let fileTarget = $state<{worker:Worker;path:string;line?:number}|null>(null);
-  type FileEditorProps = {worker:Worker;path:string;line?:number;rightSidebarVisible?:boolean;workerAvailable?:boolean;onClose:()=>void};
-  let FileEditorView = $state<Component<FileEditorProps,{requestClose:()=>Promise<boolean>}>|null>(null);
-  let fileViewLoading = $state(false);
-  let fileViewError = $state<string|null>(null);
-  let fileEditor = $state<{requestClose():Promise<boolean>}>();
   type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void };
-  type DiffViewProps = { text: string; worker: Worker; onClose: () => void; onRefresh: () => void; loading: boolean; error: string|null };
   let SettingsView = $state<Component<SettingsViewProps>|null>(null);
   let settingsLoading = $state(false);
   let settingsError = $state<string|null>(null);
-  let DiffViewComponent = $state<Component<DiffViewProps>|null>(null);
-  let diffViewLoading = $state(false);
-  let diffViewError = $state<string|null>(null);
   let sidebar = $state<{ focusList(): void; toggleCollapsedProjects(): void }>();
-  let workspace = $state<{ handleShortcut(event: KeyboardEvent): boolean; focusActive(): void; createTerminal(kind?: TerminalKind): Promise<void>; activateTerminal(terminalId: string): void }>();
+  let workspace = $state<{ handleShortcut(event: KeyboardEvent): boolean; focusActive(): void; createTerminal(kind?: TerminalKind): Promise<void>; activateTerminal(terminalId: string): void; openDocument(document: TabDocument): void; requestLeave(): Promise<boolean> }>();
   let history = $state<{projectId:string;workerId?:string}[]>([]);
   let historyIndex = $state(-1);
   let toasts = $state<{id:number;message:string;error:boolean}[]>([]);
   let nextToast = 0;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const busy = new Set<string>();
-  let diffGeneration = 0;
   let systemDark = $state(true);
   let disposed = false;
   let hydrating = true;
@@ -79,7 +62,6 @@
   const projectWorkers = $derived(workers.filter(w => w.project_id === selectedProjectId));
   const worker = $derived(workers.find(w => w.id === activeWorkerId) ?? null);
   const workerTerminals = $derived(terminals.filter(t => t.worker_id === activeWorkerId));
-  const diffTarget = $derived(workers.find(w => w.id === diffWorkerId) ?? null);
 
   function notify(message:string, error = false) {
     const id = ++nextToast;
@@ -104,7 +86,6 @@
     terminals = terminals.filter(t => t.worker_id !== id);
     workers = workers.filter(w => w.id !== id);
     if (activeWorkerId === id) activeWorkerId = workers.find(w => w.project_id === selectedProjectId)?.id ?? null;
-    if (diffWorkerId === id) { diffWorkerId = null; diffOpen = false; diff = null; }
   }
   async function select(projectId:string,workerId?:string,record = true) {
     if (!(await leaveFile())) return;
@@ -112,7 +93,7 @@
     const nextWorkerId = workerId ?? workers.find(w => w.project_id === projectId)?.id ?? null;
     if (nextWorkerId !== activeWorkerId) activeTerminalId = null;
     activeWorkerId = nextWorkerId;
-    page = 'terminal'; diffOpen = false; diffRequest = null;
+    page = 'terminal';
     if (record) {
       const previous = history[historyIndex];
       if (previous?.projectId !== projectId || previous.workerId !== activeWorkerId) {
@@ -176,72 +157,26 @@
     for (const value of values) applyWorker(value);
     await select(projectId,values[0]?.id); createOpen = keepOpen;
   }
-  /** New Terminal from a file or diff view: a shell in the selected worktree, never a new worktree. */
-  async function newTerminal():Promise<TerminalSession|null> {
-    const target = worker;
-    if (!target) return null;
-    if (!(await leaveFile())) return null;
-    return applyTerminal(await createTerminalApi(target.id,null,'shell'));
-  }
-  async function showNewTerminal() {
-    const created = await newTerminal();
-    if (!created) return;
-    fileTarget = null; diffOpen = false; page = 'terminal';
-    await tick();
-    workspace?.activateTerminal(created.id);
-  }
   async function createWorkspaceTerminal(kind:TerminalKind,sourceTerminalId:string|null):Promise<TerminalSession> {
     const target = worker;
     if (!target) throw new Error('Select a workspace before creating a terminal.');
     return applyTerminal(await createTerminalApi(target.id,sourceTerminalId,kind));
   }
+  /** Every open editor may hold unsaved changes; false means the user cancelled leaving. */
   async function leaveFile():Promise<boolean> {
-    const previous = fileTarget;
-    if (!previous) return true;
-    if (fileEditor && !(await fileEditor.requestClose())) return false;
-    if (fileTarget !== previous) return false;
-    fileTarget = null;
-    return true;
+    return workspace ? await workspace.requestLeave() : true;
   }
-  async function loadFileView() {
-    if (FileEditorView || fileViewLoading) return;
-    fileViewLoading = true; fileViewError = null;
-    try { FileEditorView = (await import('./ui/FileEditor.svelte')).default; }
-    catch (error) { fileViewError = errorMessage(error); }
-    finally { fileViewLoading = false; }
+  /** Files and diffs open as tabs in the workspace's active group, beside the terminals. */
+  async function openDocument(document:TabDocument) {
+    if (!worker) return;
+    page = 'terminal';
+    await tick();
+    workspace?.openDocument(document);
   }
-  async function openFile(path:string,line?:number) {
-    const target = worker;
-    if (!target) return;
-    if (fileTarget?.worker.id === target.id && fileTarget.path === path) {
-      fileTarget = {...fileTarget,line}; return;
-    }
-    if (!(await leaveFile())) return;
-    fileTarget = {worker:target,path,line};
-    page = 'terminal'; diffOpen = false;
-    void loadFileView();
-  }
-  async function refreshDiff(target = worker) {
-    if (!target) return;
-    const generation = ++diffGeneration;
-    diffWorkerId = target.id; diffLoading = true; diffError = null; diff = null;
-    const request = diffRequest?.workerId === target.id ? diffRequest : null;
-    try { const text = request ? await getWorkspaceFileDiff(target.id,request.path,request.staged) : await diffWorker(target.id); if (generation === diffGeneration) diff = text; }
-    catch (error) { if (generation === diffGeneration) diffError = errorMessage(error); }
-    finally { if (generation === diffGeneration) diffLoading = false; }
-  }
-  async function loadDiffView() {
-    if (DiffViewComponent || diffViewLoading) return;
-    diffViewLoading = true; diffViewError = null;
-    try { DiffViewComponent = (await import('./ui/DiffView.svelte')).default; }
-    catch (error) { diffViewError = errorMessage(error); }
-    finally { diffViewLoading = false; }
-  }
+  async function openFile(path:string,line?:number) { await openDocument({kind:'file',path,line}); }
   async function openDiff(target:Worker,path?:string,staged = false) {
-    if (!(await leaveFile())) return;
-    diffRequest = path ? {workerId:target.id,path,staged} : null;
-    page = 'terminal'; diffOpen = true;
-    void loadDiffView(); void refreshDiff(target);
+    if (target.id !== activeWorkerId) { await select(target.project_id,target.id); }
+    await openDocument({kind:'diff',path:path ?? null,staged});
   }
   async function loadSettings() {
     if (SettingsView || settingsLoading) return;
@@ -252,13 +187,13 @@
   }
   async function openSettings() {
     if (!(await leaveFile())) return;
-    page = 'settings'; diffOpen = false;
+    page = 'settings';
     void loadSettings();
   }
   function closeSettings() { page = 'terminal'; }
   async function action(kind:Action,target:Worker) {
     if (kind === 'diff') { await openDiff(target); return; }
-    if (kind === 'delete' && fileTarget?.worker.id === target.id && !(await leaveFile())) return;
+    if (kind === 'delete' && target.id === activeWorkerId && !(await leaveFile())) return;
     if (kind === 'merge' || kind === 'delete') { confirm = {action:kind,worker:target,busy:false,error:null}; return; }
     if (busy.has(target.id)) return;
     busy.add(target.id);
@@ -284,7 +219,7 @@
     catch (error) { notify(`Could not save appearance: ${errorMessage(error)}`,true); }
   }
   function setPanel(value:string) { panel = value; rightVisible = true; }
-  async function feature(name:string) { if (!(await leaveFile())) return; page = name; diffOpen = false; }
+  async function feature(name:string) { if (!(await leaveFile())) return; page = name; }
   let viewportWidth = $state(1440);
   const shellViewport = $derived(Math.max(320, Number.isFinite(viewportWidth) ? viewportWidth : 1440));
   const compactShell = $derived(shellViewport < 960);
@@ -370,16 +305,6 @@
       if (event.shiftKey && key === 'y') { event.preventDefault(); feature('Plugins'); return; }
     }
     if (event.ctrlKey && event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); navigate(event.key === 'ArrowLeft' ? -1 : 1); return; }
-    if (fileTarget) {
-      if (event.ctrlKey && key === 'w') { event.preventDefault(); void leaveFile(); }
-      else if (event.ctrlKey && key === 't') { event.preventDefault(); void showNewTerminal().catch(error => notify(errorMessage(error),true)); }
-      return;
-    }
-    if (diffOpen) {
-      if (event.ctrlKey && key === 'w') { event.preventDefault(); diffOpen = false; }
-      else if (event.ctrlKey && key === 't') { event.preventDefault(); void showNewTerminal().catch(error => notify(errorMessage(error),true)); }
-      return;
-    }
     if (page === 'terminal') workspace?.handleShortcut(event);
   }
   $effect(() => {
@@ -399,7 +324,7 @@
     return () => window.removeEventListener('resize',update);
   });
   $effect(() => { if (confirm && confirmDialog && !confirmDialog.open) confirmDialog.showModal(); else if (!confirm && confirmDialog?.open) confirmDialog.close(); });
-  const watchedWorkerId = $derived(page === 'terminal' && (effectiveRight || fileTarget !== null) ? activeWorkerId : null);
+  const watchedWorkerId = $derived(page === 'terminal' ? activeWorkerId : null);
   $effect(() => {
     const id = watchedWorkerId;
     if (!desktop || !id) return;
@@ -461,45 +386,12 @@
           {#if booting}<div class="flex h-full items-center justify-center text-sm text-muted-foreground" role="status">Loading workspace…</div>
           {:else if bootError}<div class="m-auto max-w-lg space-y-3 p-6" role="alert"><h1 class="text-lg font-semibold">Workspace failed to load</h1><p class="mn-error">{bootError}</p><button class="mn-button" onclick={start}>Retry</button></div>
           {:else if page !== 'terminal'}<div class="flex min-h-0 flex-1 flex-col"><header class="border-b border-border px-6 py-5"><h1 class="text-xl font-semibold">{page}</h1></header><div class="m-auto max-w-lg space-y-3 p-8 text-center"><h2 class="text-lg font-medium">{page} is unavailable in this build</h2><p class="text-sm text-muted-foreground">This Orca shell entry is reserved. Minnow does not start the associated service.</p><button class="mn-button" onclick={() => { page = 'terminal'; }}>Back to workspace</button></div></div>
-          {:else if fileTarget}
-            {#if FileEditorView}
-              {#key `${fileTarget.worker.id}:${fileTarget.path}`}
-                <FileEditorView bind:this={fileEditor} worker={fileTarget.worker} path={fileTarget.path} line={fileTarget.line} rightSidebarVisible={effectiveRight} workerAvailable={workers.some(value => value.id === fileTarget?.worker.id)} onClose={() => { fileTarget = null; }}/>
-              {/key}
-            {:else if fileViewError}
-              <div class="m-auto max-w-lg space-y-3 p-6" role="alert"><h2 class="text-lg font-semibold">Editor failed to load</h2><p class="mn-error">{fileViewError}</p><div class="flex gap-2"><button class="mn-button" onclick={() => { void loadFileView(); }}>Retry</button><button class="mn-button" onclick={() => { fileTarget = null; }}>Back to workspace</button></div></div>
-            {:else}
-              <div class="m-auto p-6 text-sm text-muted-foreground" role="status">Loading file editor…</div>
-            {/if}
-          {:else if diffOpen && diffTarget}
-            <div class="titlebar" data-tauri-drag-region>
-              {#if !effectiveSidebar}<button class="mn-icon-button ml-2" aria-label="Toggle sidebar" title="Toggle sidebar (Ctrl+B)" onclick={toggleSidebar}><PanelLeft size={16}/></button>{/if}
-              <button class="flex h-full min-w-36 max-w-[300px] flex-1 items-center gap-1.5 border-r border-border bg-tab-inactive px-2 text-xs text-muted-foreground hover:text-foreground" onclick={() => { diffOpen = false; }}><TerminalSquare size={12}/><span class="truncate">{diffTarget.name}</span></button>
-              <div class="flex h-full min-w-36 max-w-[300px] flex-1 items-center gap-1.5 border-r border-b-2 border-border border-b-foreground bg-tab-active px-2 text-xs"><GitCompareArrows size={12}/><span class="min-w-0 flex-1 truncate">Changes (diff)</span><button class="mn-icon-button" aria-label="Close diff tab" onclick={() => { diffOpen = false; }}><X size={12}/></button></div>
-              <button class="mn-icon-button mx-2" aria-label="New terminal" title="New terminal (Ctrl+T)" onclick={() => { void showNewTerminal().catch(error => notify(errorMessage(error),true)); }}><Plus size={14}/></button>
-              <span class="flex-1" data-tauri-drag-region></span>
-              {#if !effectiveRight}<button class="mn-icon-button mr-2" aria-label="Toggle right sidebar" title="Toggle right sidebar (Ctrl+L)" onclick={toggleRightSidebar}><PanelRight size={16}/></button><div class="window-controls-titlebar-spacer"></div>{/if}
-            </div>
-            {#if DiffViewComponent}
-              <DiffViewComponent text={diff ?? ''} worker={diffTarget} onClose={() => { diffOpen = false; }} onRefresh={() => { void refreshDiff(diffTarget); }} loading={diffLoading} error={diffError}/>
-            {:else if diffViewError}
-              <div class="m-auto max-w-lg space-y-3 p-6" role="alert">
-                <h2 class="text-lg font-semibold">Diff view failed to load</h2>
-                <p class="mn-error">{diffViewError}</p>
-                <div class="flex gap-2"><button class="mn-button" onclick={() => { void loadDiffView(); }}>Retry</button><button class="mn-button primary" onclick={() => { diffOpen = false; }}>Back to workspace</button></div>
-              </div>
-            {:else}
-              <div class="m-auto space-y-2 p-6 text-center" role="status">
-                <h2 class="text-lg font-semibold">Loading diff view…</h2>
-                <p class="text-sm text-muted-foreground">Preparing the changes viewer.</p>
-              </div>
-            {/if}
           {:else if project && worker}
             <Workspace bind:this={workspace} {project} {worker} terminals={workerTerminals} {preferences} onActivateTerminal={id => { activeTerminalId = id || null; }} onCreateTerminal={createWorkspaceTerminal} onRestartTerminal={async id => applyTerminal(await restartTerminal(id))} onStopTerminal={async id => applyTerminal(await killTerminal(id))} onCloseTerminal={async id => applyTerminal(await closeTerminal(id))} onStopWorker={async target => { applyWorker(await killWorker(target.id)); }} onAction={(kind,value) => { void action(kind,value); }} onFeature={feature} onError={message => notify(message,true)} onToggleSidebar={toggleSidebar} onToggleRightSidebar={toggleRightSidebar} sidebarVisible={effectiveSidebar} rightSidebarVisible={effectiveRight}/>
           {:else}<Landing hasProjects={projects.length > 0} onAddProject={() => { projectOpen = true; }} onCreate={() => { createOpen = true; }}/>{/if}
         </div>
       </main>
-      {#if effectiveRight}<aside class="shell-right" style:width={`${shellWidths.right}px`}><RightSidebar {worker} workers={projectWorkers} {panel} onPanel={setPanel} onRefresh={() => { if (diffOpen) void refreshDiff(diffTarget); }} onOpenDiff={(path,staged) => { if (worker) void openDiff(worker,path,staged); }} onOpenFile={(path,line) => { void openFile(path,line); }} onOpenEditor={() => { if (worker) void action('editor',worker); }} onSelect={id => { if (project) void select(project.id,id); }} onClose={() => { rightVisible = false; }}/><div role="slider" aria-label="Resize right sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="600" aria-valuenow={shellWidths.right} tabindex="0" class="sidebar-resizer left-edge" onpointerdown={event => resize(event,'right')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,rightSidebarWidth:Math.max(220,Math.min(600,shellWidths.right+(event.key === 'ArrowLeft' ? 10 : -10)))}); } }}></div></aside>{/if}
+      {#if effectiveRight}<aside class="shell-right" style:width={`${shellWidths.right}px`}><RightSidebar {worker} workers={projectWorkers} {panel} onPanel={setPanel} onRefresh={() => {}} onOpenDiff={(path,staged) => { if (worker) void openDiff(worker,path,staged); }} onOpenFile={(path,line) => { void openFile(path,line); }} onOpenEditor={() => { if (worker) void action('editor',worker); }} onSelect={id => { if (project) void select(project.id,id); }} onClose={() => { rightVisible = false; }}/><div role="slider" aria-label="Resize right sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="600" aria-valuenow={shellWidths.right} tabindex="0" class="sidebar-resizer left-edge" onpointerdown={event => resize(event,'right')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,rightSidebarWidth:Math.max(220,Math.min(600,shellWidths.right+(event.key === 'ArrowLeft' ? 10 : -10)))}); } }}></div></aside>{/if}
     </div>
   {/if}
   <footer class="mn-statusbar"><div class="flex min-w-0 items-center"><button aria-label="Notifications" onclick={() => feature('Activity')}><Bell size={12}/></button>{#if worker}<span class="truncate">{worker.status}</span><button onclick={() => { void action('diff',worker); }}><GitBranch size={12}/><span class="max-w-56 truncate">{worker.branch}</span></button>{/if}</div><div class="flex items-center"><button onclick={() => feature('Plugins')} title="Plugins"><Plug size={12}/><span>Off</span></button><button onclick={openSettings}><Monitor size={12}/><span>{workers.filter(w => w.pid !== null).length} workers</span></button><button onclick={() => feature('Remote Hosts')}>0 hosts</button></div></footer>

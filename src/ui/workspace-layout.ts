@@ -22,10 +22,17 @@ export type PaneNode =
       ratio: number;
     };
 
+/** A non-terminal tab: a file editor or a Git diff living beside the terminal tabs. */
+export type TabDocument =
+  | { kind: 'file'; path: string; line?: number }
+  | { kind: 'diff'; path: string | null; staged: boolean };
+
 export interface WorkspaceTab {
   id: string;
-  /** Primary terminal (first leaf) kept for stable lookup and legacy migrations. */
+  /** Primary terminal (first leaf) kept for stable lookup and legacy migrations. Empty for document tabs. */
   terminalId: string;
+  /** Present on file and diff tabs; terminal tabs omit it. */
+  document?: TabDocument;
   panes: PaneNode;
   focusedTerminalId: string;
   title: string | null;
@@ -107,6 +114,12 @@ export interface TerminalHandle {
   send(data: string): void;
 }
 
+/** What the workspace needs from an open document editor. */
+export interface EditorHandle {
+  /** Resolves true when nothing is lost or the user chose to discard; false on cancel. */
+  requestClose(): Promise<boolean>;
+}
+
 export type WorkerAction = 'restart' | 'stop' | 'editor' | 'diff' | 'merge' | 'delete';
 
 export interface WorkspaceApi {
@@ -141,6 +154,8 @@ export interface WorkspaceApi {
   openTabMenu(event: MouseEvent, tab: WorkspaceTab): void;
   openTerminalMenu(event: MouseEvent, groupId: string): void;
   copyText(text: string, label: string): void;
+  registerEditor(tabId: string, handle: EditorHandle | null): void;
+  setTabDirty(tabId: string, dirty: boolean): void;
   registerTerminal(
     terminalId: string,
     handle: TerminalHandle | null,
@@ -158,6 +173,8 @@ export interface WorkspaceView {
   worker: Worker;
   terminalById: Map<string, TerminalSession>;
   tabById: Map<string, WorkspaceTab>;
+  /** Document tabs whose editor holds unsaved changes. */
+  dirtyTabIds: ReadonlySet<string>;
   activeGroupId: string;
   hasSplits: boolean;
   maximizedGroupId: string | null;
@@ -278,6 +295,7 @@ export function saveSnapshot(
     tabs: snapshot.tabs.map((tab) => ({
       id: tab.id,
       terminalId: tab.terminalId,
+      ...(tab.document ? { document: { ...tab.document } } : {}),
       panes: clonePane(tab.panes ?? paneLeaf(tab.terminalId)),
       focusedTerminalId: tab.focusedTerminalId || tab.terminalId,
       title: tab.title,
@@ -468,8 +486,13 @@ export function splitPane(
   return replacePaneLeaf(node, targetTerminalId, replacement);
 }
 
+export function isDocumentTab(tab: WorkspaceTab): boolean {
+  return tab.document !== undefined;
+}
+
 /** Normalises legacy/partial tab data so callers can always traverse the pane tree. */
 export function normalizeTab(tab: WorkspaceTab): void {
+  if (isDocumentTab(tab)) return;
   if (!tab.panes || !('type' in tab.panes)) tab.panes = paneLeaf(tab.terminalId);
   const ids = paneTerminalIds(tab.panes);
   if (ids.length === 0) tab.panes = paneLeaf(tab.terminalId);
@@ -481,6 +504,7 @@ export function normalizeTab(tab: WorkspaceTab): void {
 }
 
 export function tabTerminalIds(tab: WorkspaceTab): string[] {
+  if (isDocumentTab(tab)) return [];
   if (!tab.panes || !('type' in tab.panes)) return [tab.terminalId];
   return paneTerminalIds(tab.panes);
 }
@@ -490,6 +514,7 @@ export function tabHasTerminal(tab: WorkspaceTab, terminalId: string): boolean {
 }
 
 export function tabFocusTerminal(tab: WorkspaceTab): string {
+  if (isDocumentTab(tab)) return '';
   const terminalIds = tabTerminalIds(tab);
   return terminalIds.includes(tab.focusedTerminalId)
     ? tab.focusedTerminalId
@@ -604,6 +629,49 @@ export function addTerminalTab(
   snapshot.tabs = [...snapshot.tabs, tab];
   const at = index === undefined ? group.tabIds.length : Math.min(Math.max(index, 0), group.tabIds.length);
   group.tabIds = [...group.tabIds.slice(0,at),tab.id,...group.tabIds.slice(at)];
+  if (group.activeTabId === null) group.activeTabId = tab.id;
+  return tab.id;
+}
+
+/** Finds the open tab for a document (same kind, path and staged side). */
+export function tabForDocument(snapshot: WorkspaceSnapshot, document: TabDocument): WorkspaceTab | null {
+  return (
+    snapshot.tabs.find((tab) => {
+      const value = tab.document;
+      if (!value || value.kind !== document.kind) return false;
+      if (value.kind === 'file' && document.kind === 'file') return value.path === document.path;
+      if (value.kind === 'diff' && document.kind === 'diff') {
+        return value.path === document.path && value.staged === document.staged;
+      }
+      return false;
+    }) ?? null
+  );
+}
+
+/** Adds (or returns the existing) document tab. Documents never hold terminals. */
+export function addDocumentTab(
+  snapshot: WorkspaceSnapshot,
+  document: TabDocument,
+  groupId: string,
+  index?: number,
+): string | null {
+  const existing = tabForDocument(snapshot, document);
+  if (existing) return existing.id;
+  const group = groupById(snapshot, groupId);
+  if (!group) return null;
+  const tab: WorkspaceTab = {
+    id: newId('tab'),
+    terminalId: '',
+    document,
+    panes: paneLeaf(''),
+    focusedTerminalId: '',
+    title: null,
+    color: null,
+    pinned: false,
+  };
+  snapshot.tabs = [...snapshot.tabs, tab];
+  const at = index === undefined ? group.tabIds.length : Math.min(Math.max(index, 0), group.tabIds.length);
+  group.tabIds = [...group.tabIds.slice(0, at), tab.id, ...group.tabIds.slice(at)];
   if (group.activeTabId === null) group.activeTabId = tab.id;
   return tab.id;
 }
@@ -989,9 +1057,36 @@ function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
   };
 }
 
+function parseDocument(raw: unknown): TabDocument | null {
+  if (typeof raw !== 'object' || raw === null || !('kind' in raw)) return null;
+  if (raw.kind === 'file') {
+    if (!('path' in raw) || typeof raw.path !== 'string' || raw.path.length === 0) return null;
+    return { kind: 'file', path: raw.path };
+  }
+  if (raw.kind === 'diff') {
+    const path = 'path' in raw && typeof raw.path === 'string' ? raw.path : null;
+    return { kind: 'diff', path, staged: 'staged' in raw && raw.staged === true };
+  }
+  return null;
+}
+
 function parseWorkspaceTab(value: unknown): WorkspaceTab | null {
   if (typeof value !== 'object' || value === null) return null;
   if (!('id' in value) || typeof value.id !== 'string') return null;
+  if ('document' in value && value.document !== undefined) {
+    const document = parseDocument(value.document);
+    if (!document) return null;
+    return {
+      id: value.id,
+      terminalId: '',
+      document,
+      panes: paneLeaf(''),
+      focusedTerminalId: '',
+      title: 'title' in value && typeof value.title === 'string' ? value.title : null,
+      color: 'color' in value && typeof value.color === 'string' ? value.color : null,
+      pinned: 'pinned' in value && value.pinned === true,
+    };
+  }
   if (!('terminalId' in value) || typeof value.terminalId !== 'string') return null;
   const parsed = 'panes' in value ? parsePane(value.panes) : null;
   const panes = parsed ?? paneLeaf(value.terminalId);

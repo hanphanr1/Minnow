@@ -4,6 +4,8 @@
     ChevronLeft,
     ChevronRight,
     Ellipsis,
+    FileText,
+    GitCompareArrows,
     Minimize2,
     Pin,
     Plus,
@@ -66,7 +68,16 @@
     strip?.scrollBy({ left: direction * 240, behavior: 'smooth' });
   }
 
+  function baseName(path: string): string {
+    return path.split('/').filter(Boolean).pop() ?? path;
+  }
+
   function labelFor(tab: WorkspaceTab): string {
+    if (tab.document?.kind === 'file') return tab.title?.trim() || baseName(tab.document.path);
+    if (tab.document?.kind === 'diff') {
+      const name = tab.document.path ? baseName(tab.document.path) : 'Changes';
+      return tab.title?.trim() || `${name} (diff${tab.document.staged ? ', staged' : ''})`;
+    }
     const terminal = view.terminalById.get(tab.terminalId);
     return tab.title?.trim() || terminal?.name || 'Terminal';
   }
@@ -200,7 +211,13 @@
               aria-hidden="true"
             ></span>
           {/if}
-          <SquareTerminal size={13} class="mr-1 shrink-0 {statusClass(tab)}" aria-hidden="true" />
+          {#if tab.document?.kind === 'file'}
+            <FileText size={13} class="mr-1 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {:else if tab.document?.kind === 'diff'}
+            <GitCompareArrows size={13} class="mr-1 shrink-0 text-muted-foreground" aria-hidden="true" />
+          {:else}
+            <SquareTerminal size={13} class="mr-1 shrink-0 {statusClass(tab)}" aria-hidden="true" />
+          {/if}
           {#if tab.pinned}
             <Pin size={12} class="mr-1 shrink-0 text-muted-foreground" aria-hidden="true" />
           {/if}
@@ -235,6 +252,9 @@
             />
           {:else}
             <span class="tab-label mr-1 min-w-0 flex-1 truncate">{labelFor(tab)}</span>
+            {#if view.dirtyTabIds.has(tab.id)}
+              <span class="mr-1 size-1.5 shrink-0 rounded-full bg-foreground" role="img" aria-label="Unsaved changes" title="Unsaved changes"></span>
+            {/if}
           {/if}
           {#if tab.color && view.ui.editingTabId !== tab.id}
             <span

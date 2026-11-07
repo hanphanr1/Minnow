@@ -38,6 +38,7 @@
     TAB_COLORS,
     WS_API,
     WS_VIEW,
+    addDocumentTab,
     addTerminalTab,
     adjacentGroupId,
     adjacentTabId,
@@ -49,6 +50,7 @@
     equalizeLayout,
     groupById,
     groupContainingTab,
+    isDocumentTab,
     isPaneMaximizeValid,
     isTerminalLive,
     isTextEntryTarget,
@@ -65,6 +67,7 @@
     splitPane,
     tabById as findTabById,
     tabByTerminal as findTabForTerminal,
+    tabForDocument,
     tabFocusTerminal,
     tabHasTerminal,
     tabTerminalIds,
@@ -73,7 +76,9 @@
     type ClosedTabEntry,
     type DragState,
     type DropPosition,
+    type EditorHandle,
     type LayoutNode,
+    type TabDocument,
     type TabInsertion,
     type TerminalHandle,
     type WorkspaceApi,
@@ -177,6 +182,9 @@
   let layoutBusy = 0;
 
   const terminalHandles = new Map<string, TerminalHandle>();
+  /** Open file editors by tab id; each owns its own dirty document. */
+  const editors = new Map<string, EditorHandle>();
+  let dirtyTabIds = $state<Set<string>>(new Set());
 
   const terminalById = $derived(new Map(terminals.map((terminal) => [terminal.id, terminal])));
   const tabById = $derived(new Map(snapshot.tabs.map((tab) => [tab.id, tab])));
@@ -208,6 +216,9 @@
     },
     get tabById() {
       return tabById;
+    },
+    get dirtyTabIds() {
+      return dirtyTabIds;
     },
     get activeGroupId() {
       return snapshot.activeGroupId;
@@ -260,7 +271,14 @@
     if (layoutBusy === 0) void tick().then(reconcile);
   }
 
+  function documentLabel(document: TabDocument): string {
+    const name = (path: string): string => path.split('/').filter(Boolean).pop() ?? path;
+    if (document.kind === 'file') return name(document.path);
+    return `${document.path ? name(document.path) : 'Changes'} (diff${document.staged ? ', staged' : ''})`;
+  }
+
   function tabLabel(tab: WorkspaceTab): string {
+    if (tab.document) return tab.title?.trim() || documentLabel(tab.document);
     const terminal = terminalById.get(tab.terminalId);
     return tab.title?.trim() || terminal?.name || worker.name || 'Terminal';
   }
@@ -355,8 +373,15 @@
       groupId: group?.id ?? snapshot.activeGroupId,
       index: group ? group.tabIds.indexOf(tabId) : 0,
     };
-    pushClosedTab(snapshot, entry);
+    // Reopen restarts terminals; a document tab is reopened from the Explorer instead.
+    if (!isDocumentTab(tab)) pushClosedTab(snapshot, entry);
     removeTab(snapshot, tabId);
+    editors.delete(tabId);
+    if (dirtyTabIds.has(tabId)) {
+      const next = new Set(dirtyTabIds);
+      next.delete(tabId);
+      dirtyTabIds = next;
+    }
     if (group && group.tabIds.length === 0 && snapshot.groups.length > 1) {
       // The vanished group is already empty, so collapsing it only repairs the layout.
       collapseGroup(snapshot, group.id);
@@ -390,6 +415,9 @@
     const started = scope;
     beginLayoutWork();
     try {
+      // An editor with unsaved changes asks before its tab goes away.
+      const editor = editors.get(tabId);
+      if (editor && !(await editor.requestClose())) return false;
       if (!(await closeTerminalsNative(tabTerminalIds(tab)))) return false;
       if (scope !== started) return false;
       return finishCloseTab(tabId, notifyParent);
@@ -593,6 +621,32 @@
     }
   }
 
+  /** Opens (or focuses) a file or diff as a tab in the active group. */
+  export function openDocument(document: TabDocument): void {
+    if (scope === null) return;
+    const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
+    if (!group) return;
+    const existing = tabForDocument(snapshot, document);
+    if (existing?.document?.kind === 'file' && document.kind === 'file') {
+      existing.document = { ...existing.document, line: document.line };
+    }
+    const tabId = existing?.id ?? addDocumentTab(snapshot, document, group.id);
+    if (!tabId) return;
+    persist();
+    activateTabInternal(tabId, true);
+  }
+
+  /**
+   * Asks every open editor with unsaved changes whether to keep or discard them.
+   * False when the user cancelled, so navigation can stay where it is.
+   */
+  export async function requestLeave(): Promise<boolean> {
+    for (const editor of [...editors.values()]) {
+      if (!(await editor.requestClose())) return false;
+    }
+    return true;
+  }
+
   /** Adds a new terminal tab in the selected worktree. Never creates a worktree. */
   export async function createTerminal(kind: TerminalKind = 'shell'): Promise<void> {
     const started = scope;
@@ -635,6 +689,18 @@
         if (scope !== started) return;
         const tabId = addTerminalTab(snapshot, created.id, group.id);
         if (tabId) activateTabInternal(tabId, true);
+        return;
+      }
+      if (target.document) {
+        // A document has no terminal to copy: the split gets a fresh shell in its own group.
+        const created = await onCreateTerminal('shell', null);
+        await tick();
+        if (scope !== started) return;
+        const tabId = addTerminalTab(snapshot, created.id, group.id);
+        if (!tabId) return;
+        splitTabToNewGroup(snapshot, tabId, group.id, direction, true);
+        persist();
+        activateTabInternal(tabId, true);
         return;
       }
       const targetId = target.id;
@@ -1025,6 +1091,7 @@
       ]},
       separator(),
       menuItem(tab.pinned ? 'Unpin Tab' : 'Pin Tab', tab.pinned ? PinOff : Pin, undefined, () => togglePin(tab.id)),
+      ...(tab.document?.kind === 'file' ? [menuItem('Copy Path',Copy,undefined,() => void copyText(tab.document?.kind === 'file' ? tab.document.path : '','Path'))] : []),
       menuItem('Copy Tab ID',Copy,undefined,() => void copyText(tab.id,'Tab ID')),
       separator(),
       menuItem('Close', X, 'Ctrl+W', () => requestCloseTab(tab.id), { danger: true }),
@@ -1470,7 +1537,7 @@
       if (ordered.includes(id)) return;
       if (!tabById.has(id)) return;
       const tab = tabById.get(id);
-      if (!tab || !tabTerminalIds(tab).some((terminalId) => terminalById.has(terminalId))) return;
+      if (!tab || (!tab.document && !tabTerminalIds(tab).some((terminalId) => terminalById.has(terminalId)))) return;
       ordered.push(id);
     };
     for (const id of snapshot.recentTabIds) push(id);
@@ -1891,6 +1958,17 @@
     copyText(text, label) {
       void copyText(text, label);
     },
+    registerEditor(tabId, handle) {
+      if (handle) editors.set(tabId, handle);
+      else editors.delete(tabId);
+    },
+    setTabDirty(tabId, dirty) {
+      if (dirtyTabIds.has(tabId) === dirty) return;
+      const next = new Set(dirtyTabIds);
+      if (dirty) next.add(tabId);
+      else next.delete(tabId);
+      dirtyTabIds = next;
+    },
     registerTerminal(terminalId, handle, identity) {
       if (handle) {
         terminalHandles.set(terminalId, handle);
@@ -1927,6 +2005,8 @@
       recent = null;
       confirmState = null;
       terminalHandles.clear();
+      editors.clear();
+      dirtyTabIds = new Set();
       // loadSnapshot reconciled against the live roster after it saved; store the result.
       persist();
       // Never notify the parent while mounting: it owns the restored selection.
@@ -2170,7 +2250,7 @@
         {#each recent.ids as id, index (id)}
           {@const tab = tabById.get(id)}
           {@const switchTarget = tab ? terminalById.get(tabFocusTerminal(tab)) : null}
-          {#if tab && switchTarget}
+          {#if tab && (tab.document || switchTarget)}
             <button
               type="button"
               role="option"

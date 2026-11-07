@@ -11,6 +11,7 @@
     X,
   } from 'lucide-svelte';
   import Terminal from '../Terminal.svelte';
+  import DocumentPane from './DocumentPane.svelte';
   import WorkspaceTabStrip from './WorkspaceTabStrip.svelte';
   import {
     WS_API,
@@ -445,7 +446,11 @@
             {@const active = activeId === tabId}
             {@const paneRoot = maximizedPaneRoot(tab, active)}
             <div class="absolute inset-0 flex {active ? '' : 'hidden'}" data-tab-pane={tabId}>
-              {@render renderTabPanes(tab, paneRoot, '', active, groupId)}
+              {#if tab.document}
+                <DocumentPane {tab} />
+              {:else}
+                {@render renderTabPanes(tab, paneRoot, '', active, groupId)}
+              {/if}
             </div>
           {/if}
         {/each}

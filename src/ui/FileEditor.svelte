@@ -29,7 +29,8 @@
     line,
     rightSidebarVisible = true,
     workerAvailable = true,
-    onClose
+    onClose,
+    onDirtyChange
   }: {
     worker: Worker;
     path: string;
@@ -37,9 +38,15 @@
     rightSidebarVisible?: boolean;
     workerAvailable?: boolean;
     onClose: () => void;
+    /** Lets a host (a workspace tab) show and guard unsaved changes. */
+    onDirtyChange?: (dirty: boolean) => void;
   } = $props();
 
   const workerId = $derived(worker.id);
+
+  $effect(() => {
+    onDirtyChange?.(dirty);
+  });
 
   let container = $state<HTMLDivElement | null>(null);
   let loading = $state(true);
