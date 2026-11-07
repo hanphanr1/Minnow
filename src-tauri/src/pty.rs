@@ -87,6 +87,30 @@ impl PromptDetector {
     fn clear(&mut self) { self.text.clear(); self.escape = 0; }
 }
 
+#[cfg(windows)]
+#[derive(Default)]
+struct StartupCursor { matched: usize, finished: bool }
+
+#[cfg(windows)]
+impl StartupCursor {
+    fn feed<'a>(&mut self, data: &'a [u8]) -> (&'static [u8], &'a [u8], bool) {
+        const QUERY: &[u8] = b"\x1b[6n";
+        if self.finished { return (&[], data, false); }
+        for (index, &byte) in data.iter().enumerate() {
+            if byte != QUERY[self.matched] {
+                self.finished = true;
+                return (&QUERY[..self.matched], &data[index..], false);
+            }
+            self.matched += 1;
+            if self.matched == QUERY.len() {
+                self.finished = true;
+                return (&[], &data[index + 1..], true);
+            }
+        }
+        (&[], &[], false)
+    }
+}
+
 struct PtyIo {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -278,14 +302,38 @@ impl Manager {
         let output_id = worker.id.clone();
         thread::spawn(move || {
             let mut bytes = [0; 16 * 1024];
+            #[cfg(windows)]
+            let mut startup_cursor = StartupCursor::default();
             loop {
                 match reader.read(&mut bytes) {
                     Ok(0) => break,
                     Ok(count) => {
                         if output_session.generation.load(Ordering::Acquire) != generation { break; }
+                        // ConPTY's inherited-cursor bootstrap must work without an attached xterm.
+                        // Consume it once so replay cannot inject a stale cursor report into omp.
+                        #[cfg(windows)]
+                        let (prefix, data, reply) = startup_cursor.feed(&bytes[..count]);
+                        #[cfg(not(windows))]
+                        let (prefix, data, reply): (&[u8], &[u8], bool) = (&[], &bytes[..count], false);
+                        if reply {
+                            let result = {
+                                let mut io = output_session.io.lock().unwrap();
+                                io.as_mut().ok_or_else(|| "PTY closed during cursor negotiation".to_owned())
+                                    .and_then(|io| io.writer.write_all(b"\x1b[1;1R").and_then(|_| io.writer.flush()).map_err(|e| e.to_string()))
+                            };
+                            if let Err(error) = result {
+                                if let Some(engine) = weak.upgrade() {
+                                    let mut record = output_session.worker.lock().unwrap();
+                                    record.last_error = Some(format!("ConPTY cursor negotiation failed: {error}"));
+                                    let _ = engine.app.emit("worker-updated", &*record);
+                                }
+                            }
+                        }
+                        if prefix.is_empty() && data.is_empty() { continue; }
                         let mut stream = output_session.stream.lock().unwrap();
                         stream.activity = Instant::now();
-                        stream.prompt.push(&bytes[..count]); stream.ring.append(&bytes[..count]);
+                        stream.prompt.push(prefix); stream.prompt.push(data);
+                        stream.ring.append(prefix); stream.ring.append(data);
                         stream.send_pending(&output_id);
                         if let Some(engine) = weak.upgrade() {
                             if output_session.alive.load(Ordering::Acquire) { engine.set_status(&output_session, STATUS_RUNNING); }
@@ -502,5 +550,20 @@ mod tests {
         assert!(prompt.is_waiting());
         prompt.clear(); prompt.push(b"ordinary model response");
         assert!(!prompt.is_waiting());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn startup_cursor_query_is_consumed_once_across_reads() {
+        let mut startup = StartupCursor::default();
+        assert_eq!(startup.feed(b"\x1b["), (&b""[..], &b""[..], false));
+        assert_eq!(startup.feed(b"6nready"), (&b""[..], &b"ready"[..], true));
+        assert_eq!(startup.feed(b"\x1b[6n"), (&b""[..], &b"\x1b[6n"[..], false));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn non_bootstrap_escape_bytes_are_not_discarded() {
+        let mut startup = StartupCursor::default();
+        let _ = startup.feed(b"\x1b[");
+        assert_eq!(startup.feed(b"?25l"), (&b"\x1b["[..], &b"?25l"[..], false));
     }
 }
