@@ -1,6 +1,6 @@
-# Terminal cutover: paused design contract
+# Terminal cutover: design contract
 
-Status: design/partial frontend migration only. Native implementation has not started. The verified runnable checkpoint is `1f4746c`; do not treat this document as proof of implementation. See SESSION_HANDOFF.md for the exact paused file inventory.
+Status: IMPLEMENTED and exercised on the native desktop (isolated MINNOW_DATA_DIR). Native `TerminalSession`/SQLite migration/PTY commands/OSC 7 observer, the frontend layout v3, Workspace and App are integrated; there are no workerId PTY aliases. The sections below remain the contract; SESSION_HANDOFF.md lists the evidence and the limits.
 
 # Goal
 Port Orca's many-terminals-per-worktree behavior to Minnow. A new terminal or pane split MUST NOT call Git worktree creation. Preserve independent process ownership, 2 MiB output ring per terminal, 64 KiB acknowledgement window, visible-only xterm mounts, and deterministic shutdown/resume. Do not claim actual omp inference/RAM results from smoke fixtures.

@@ -1,12 +1,16 @@
 //! SQLite persistence for projects, workers, and settings.
 //!
-//! The database stores durable state only. Runtime facts such as the worker
+//! The database stores durable state only. Runtime facts such as the terminal
 //! status, pid, and exit code intentionally live in memory: after a restart no
-//! child process is running, so a loaded worker always begins as `exited` with
-//! no pid or exit code. `desired_running` and `last_error` are persisted so the
-//! manager can decide what to resume and why a worker stopped.
+//! child process is running, so a loaded terminal always begins as `exited` with
+//! no pid or exit code. `desired_running` and `last_error` are persisted per
+//! terminal so the manager can decide what to resume and why one stopped.
+//!
+//! A worker is the Git worktree identity. Its legacy `desired_running` and
+//! `last_error` columns are only migration input for its primary terminal; they
+//! are never written again after the migration.
 
-use crate::model::{Project, Settings, Worker, STATUS_EXITED};
+use crate::model::{Project, Settings, TerminalSession, Worker, STATUS_EXITED};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -41,6 +45,33 @@ CREATE TABLE IF NOT EXISTS workers (
     last_error TEXT,
     UNIQUE (project_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+    id TEXT PRIMARY KEY NOT NULL,
+    worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('agent', 'shell')),
+    cwd TEXT NOT NULL,
+    session_path TEXT NOT NULL,
+    desired_running INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    closed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS terminal_sessions_worker ON terminal_sessions(worker_id);
+"#;
+
+/// Gives every worker that has no terminal record yet one primary agent
+/// terminal whose id equals the worker id and which keeps the worker's old
+/// session directory, resume flag and last error.
+///
+/// A worker with any terminal record, including a closed one, is already
+/// migrated, so rerunning this never invents a second primary.
+const MIGRATE_PRIMARY_TERMINALS: &str = r#"
+INSERT INTO terminal_sessions (id, worker_id, name, kind, cwd, session_path, desired_running, last_error, closed)
+SELECT w.id, w.id, w.name, 'agent', w.path, w.session_path, w.desired_running, w.last_error, 0
+FROM workers w
+WHERE NOT EXISTS (SELECT 1 FROM terminal_sessions t WHERE t.worker_id = w.id);
 "#;
 
 /// Thread-safe handle to the application database.
@@ -78,6 +109,12 @@ impl Store {
         connection
             .execute_batch(SCHEMA)
             .map_err(|error| format!("cannot initialize database schema: {error}"))?;
+        // One transaction: a crash can never leave only some workers migrated.
+        connection
+            .execute_batch(&format!("BEGIN IMMEDIATE;
+{MIGRATE_PRIMARY_TERMINALS}
+COMMIT;"))
+            .map_err(|error| format!("cannot migrate terminal sessions: {error}"))?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -209,14 +246,15 @@ impl Store {
         Ok(())
     }
 
+    /// Saves the worktree identity. Runtime and resume state live on its
+    /// terminals; the legacy worker columns are deliberately not rewritten.
     pub fn save_worker(&self, worker: &Worker) -> Result<(), String> {
         let connection = self.lock()?;
-        let desired_running = if worker.desired_running { 1i64 } else { 0i64 };
         connection
             .execute(
                 "INSERT INTO workers (id, project_id, name, path, branch, base_ref,
-                                      base_commit, session_path, desired_running, last_error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                                      base_commit, session_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                      project_id = excluded.project_id,
                      name = excluded.name,
@@ -224,9 +262,7 @@ impl Store {
                      branch = excluded.branch,
                      base_ref = excluded.base_ref,
                      base_commit = excluded.base_commit,
-                     session_path = excluded.session_path,
-                     desired_running = excluded.desired_running,
-                     last_error = excluded.last_error",
+                     session_path = excluded.session_path",
                 params![
                     worker.id,
                     worker.project_id,
@@ -236,11 +272,59 @@ impl Store {
                     worker.base_ref,
                     worker.base_commit,
                     worker.session_path,
-                    desired_running,
-                    worker.last_error,
                 ],
             )
             .map_err(|error| database_error("cannot save worker", error))?;
+        Ok(())
+    }
+
+    /// Terminal records in creation order. Runtime fields start as `exited`.
+    pub fn terminals(&self) -> Result<Vec<TerminalSession>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, worker_id, name, kind, cwd, session_path,
+                        desired_running, last_error, closed
+                 FROM terminal_sessions ORDER BY rowid",
+            )
+            .map_err(|error| database_error("cannot read terminals", error))?;
+        let rows = statement
+            .query_map([], terminal_from_row)
+            .map_err(|error| database_error("cannot read terminals", error))?;
+        let mut terminals = Vec::new();
+        for row in rows {
+            terminals.push(row.map_err(|error| database_error("cannot read terminal", error))?);
+        }
+        Ok(terminals)
+    }
+
+    pub fn save_terminal(&self, terminal: &TerminalSession) -> Result<(), String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "INSERT INTO terminal_sessions (id, worker_id, name, kind, cwd, session_path,
+                                                desired_running, last_error, closed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     cwd = excluded.cwd,
+                     session_path = excluded.session_path,
+                     desired_running = excluded.desired_running,
+                     last_error = excluded.last_error,
+                     closed = excluded.closed",
+                params![
+                    terminal.id,
+                    terminal.worker_id,
+                    terminal.name,
+                    terminal.kind,
+                    terminal.cwd,
+                    terminal.session_path,
+                    i64::from(terminal.desired_running),
+                    terminal.last_error,
+                    i64::from(terminal.closed),
+                ],
+            )
+            .map_err(|error| database_error("cannot save terminal", error))?;
         Ok(())
     }
 
@@ -268,6 +352,24 @@ fn worker_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Worker> {
         exit_code: None,
         last_error: row.get(9)?,
         desired_running: row.get::<_, i64>(8)? != 0,
+    })
+}
+
+fn terminal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TerminalSession> {
+    Ok(TerminalSession {
+        id: row.get(0)?,
+        worker_id: row.get(1)?,
+        name: row.get(2)?,
+        kind: row.get(3)?,
+        cwd: row.get(4)?,
+        current_cwd: None,
+        session_path: row.get(5)?,
+        status: STATUS_EXITED.to_string(),
+        pid: None,
+        exit_code: None,
+        last_error: row.get(7)?,
+        desired_running: row.get::<_, i64>(6)? != 0,
+        closed: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -337,14 +439,10 @@ mod tests {
     }
 
     #[test]
-    fn projects_and_workers_persist_but_runtime_state_resets() {
+    fn projects_and_workers_persist_identity() {
         let (_directory, store, path) = temporary_store();
         let project = project("p1", "demo");
-        let mut worker = worker("w1", "p1", "alpha");
-        worker.status = STATUS_RUNNING.to_string();
-        worker.pid = Some(1234);
-        worker.exit_code = Some(7);
-        worker.last_error = Some("exited unexpectedly".to_string());
+        let worker = worker("w1", "p1", "alpha");
 
         store.save_project(&project).unwrap();
         store.save_worker(&worker).unwrap();
@@ -354,13 +452,121 @@ mod tests {
         let loaded = reopened.workers().unwrap().into_iter().find(|w| w.id == "w1").unwrap();
         assert_eq!(loaded.status, STATUS_EXITED);
         assert_eq!(loaded.pid, None);
-        assert_eq!(loaded.exit_code, None);
-        assert_eq!(loaded.last_error.as_deref(), Some("exited unexpectedly"));
-        assert!(loaded.desired_running);
         assert_eq!(loaded.branch, worker.branch);
         assert_eq!(loaded.base_commit, worker.base_commit);
         assert_eq!(loaded.session_path, worker.session_path);
         assert_eq!(reopened.projects().unwrap(), vec![project]);
+    }
+
+    fn terminal(id: &str, worker_id: &str) -> TerminalSession {
+        TerminalSession {
+            id: id.to_string(),
+            worker_id: worker_id.to_string(),
+            name: format!("Terminal {id}"),
+            kind: "shell".to_string(),
+            cwd: r"C:\repos\demo".to_string(),
+            current_cwd: Some(r"C:\runtime".to_string()),
+            session_path: format!(r"C:\sessions\{id}"),
+            status: STATUS_RUNNING.to_string(),
+            pid: Some(7),
+            exit_code: Some(1),
+            last_error: Some("boom".to_string()),
+            desired_running: true,
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn terminal_runtime_state_resets_but_resume_state_persists() {
+        let (_directory, store, path) = temporary_store();
+        store.save_project(&project("p1", "demo")).unwrap();
+        store.save_worker(&worker("w1", "p1", "alpha")).unwrap();
+        let mut extra = terminal("t2", "w1");
+        extra.closed = true;
+        extra.desired_running = false;
+        store.save_terminal(&terminal("t1", "w1")).unwrap();
+        store.save_terminal(&extra).unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let terminals = reopened.terminals().unwrap();
+        // Migration runs at open time, so a terminal saved later stays in creation order.
+        assert_eq!(
+            terminals.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
+        let loaded = &terminals[0];
+        assert_eq!(loaded.status, STATUS_EXITED);
+        assert_eq!(loaded.pid, None);
+        assert_eq!(loaded.exit_code, None);
+        assert_eq!(loaded.current_cwd, None);
+        assert_eq!(loaded.last_error.as_deref(), Some("boom"));
+        assert!(loaded.desired_running);
+        assert!(terminals[1].closed);
+    }
+
+    #[test]
+    fn legacy_workers_migrate_once_to_a_primary_agent_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        {
+            // Shape of the verified pre-terminal database.
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    r#"PRAGMA foreign_keys = ON;
+                     CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), omp_path TEXT NOT NULL, default_worker_count INTEGER NOT NULL);
+                     CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, base_ref TEXT NOT NULL);
+                     CREATE TABLE workers (
+                         id TEXT PRIMARY KEY NOT NULL,
+                         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                         name TEXT NOT NULL, path TEXT NOT NULL, branch TEXT NOT NULL,
+                         base_ref TEXT NOT NULL, base_commit TEXT NOT NULL, session_path TEXT NOT NULL,
+                         desired_running INTEGER NOT NULL DEFAULT 1, last_error TEXT,
+                         UNIQUE (project_id, name));
+                     INSERT INTO projects VALUES ('p1', 'demo', 'C:\repos\demo', 'main');
+                     INSERT INTO workers VALUES ('w1', 'p1', 'alpha', 'C:\wt\alpha', 'b1', 'main', 'abc', 'C:\sessions\w1', 1, NULL);
+                     INSERT INTO workers VALUES ('w2', 'p1', 'beta', 'C:\wt\beta', 'b2', 'main', 'abc', 'C:\sessions\w2', 0, 'old failure');"#,
+                )
+                .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let first = store.terminals().unwrap();
+        assert_eq!(first.len(), 2);
+        let alpha = first.iter().find(|t| t.id == "w1").unwrap();
+        assert_eq!(alpha.worker_id, "w1");
+        assert_eq!(alpha.kind, "agent");
+        assert_eq!(alpha.name, "alpha");
+        assert_eq!(alpha.cwd, r"C:\wt\alpha");
+        assert_eq!(alpha.session_path, r"C:\sessions\w1");
+        assert!(alpha.desired_running && !alpha.closed);
+        let beta = first.iter().find(|t| t.id == "w2").unwrap();
+        assert!(!beta.desired_running);
+        assert_eq!(beta.last_error.as_deref(), Some("old failure"));
+
+        // A different terminal id marks the worker migrated; reopening adds nothing.
+        let mut closed = terminal("t9", "w1");
+        closed.closed = true;
+        store.save_terminal(&closed).unwrap();
+        drop(store);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(again.terminals().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn saving_a_worker_does_not_rewrite_terminal_state() {
+        let (_directory, store, _path) = temporary_store();
+        store.save_project(&project("p1", "demo")).unwrap();
+        let mut value = worker("w1", "p1", "alpha");
+        store.save_worker(&value).unwrap();
+        store.save_terminal(&terminal("w1", "w1")).unwrap();
+        value.desired_running = false;
+        value.last_error = None;
+        store.save_worker(&value).unwrap();
+        let primary = store.terminals().unwrap().into_iter().find(|t| t.id == "w1").unwrap();
+        assert!(primary.desired_running);
+        assert_eq!(primary.last_error.as_deref(), Some("boom"));
     }
 
     #[test]
@@ -384,13 +590,15 @@ mod tests {
     }
 
     #[test]
-    fn delete_worker_removes_the_record() {
+    fn delete_worker_removes_the_record_and_its_terminals() {
         let (_directory, store, _path) = temporary_store();
         store.save_project(&project("p1", "demo")).unwrap();
         store.save_worker(&worker("w1", "p1", "alpha")).unwrap();
+        store.save_terminal(&terminal("t1", "w1")).unwrap();
 
         assert_eq!(store.workers().unwrap().len(), 1);
         store.delete_worker("w1").unwrap();
         assert!(store.workers().unwrap().is_empty());
+        assert!(store.terminals().unwrap().is_empty());
     }
 }

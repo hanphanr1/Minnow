@@ -1,6 +1,6 @@
 # Minnow milestones
 
-Current state: paused at the user's request for agent handoff. Verified/pushed code checkpoint: `1f4746c`. A partial terminalId frontend migration remains in the working tree; Workspace/App and native code are not integrated, so this is not a green feature milestone. Resume instructions and exact file inventory: SESSION_HANDOFF.md; copy-ready prompt: CONTINUE_PROMPT.md; terminal contract: TERMINAL_CUTOVER.md. All unchecked parity work below remains open.
+Current state: the terminal cutover (many independent terminals per worktree) is integrated and was exercised on the native desktop; SESSION_HANDOFF.md states exactly what was and was not proven. Terminal contract: TERMINAL_CUTOVER.md; next-agent prompt: CONTINUE_PROMPT.md. All unchecked parity work below remains open.
 
 ## Reference and identity
 - [x] Clone Orca into `_ref/orca`; pin the revision and MIT license.
@@ -33,7 +33,7 @@ The shell milestone is not complete Orca parity. The requested continuation incl
 - [x] Real local clone and Git project creation through the native app.
 - [x] Lazy file explorer, content search and real UTF-8 editing with revision-checked saves.
 - [x] Real staged/unstaged/untracked Git status, staging, commits and bounded history.
-- [ ] Multiple independent terminals in the same worktree, including split cwd inheritance.
+- [x] Multiple independent terminals in the same worktree, including split cwd inheritance (OSC 7 only; see SESSION_HANDOFF.md for the Windows evidence).
 - [x] Native coalesced file-change invalidation for the visible workspace and Git index.
 - [ ] Quick open, file operations and remaining explorer interactions.
 - [ ] Source-matched persistent Explorer Names/Contents strip, global filename filtering and Git decorations.

@@ -55,9 +55,36 @@ pub struct Worker {
     pub desired_running: bool,
 }
 
+pub const KIND_AGENT: &str = "agent";
+pub const KIND_SHELL: &str = "shell";
+
+/// One independently owned process inside a worktree (`Worker`).
+///
+/// Field names mirror `TerminalSession` in `src/types.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSession {
+    pub id: String,
+    pub worker_id: String,
+    pub name: String,
+    /// `agent` (omp) or `shell` (a real local shell).
+    pub kind: String,
+    /// Initial launch directory.
+    pub cwd: String,
+    /// Directory last reported by live OSC 7 output; reset on every launch.
+    pub current_cwd: Option<String>,
+    pub session_path: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub exit_code: Option<u32>,
+    pub last_error: Option<String>,
+    pub desired_running: bool,
+    pub closed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub projects: Vec<Project>,
     pub workers: Vec<Worker>,
     pub settings: Settings,
+    pub terminals: Vec<TerminalSession>,
 }

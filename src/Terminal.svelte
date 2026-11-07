@@ -6,7 +6,7 @@
   import type { WebglAddon } from '@xterm/addon-webgl';
   import { CaseSensitive, ChevronDown, ChevronUp, Regex, X } from 'lucide-svelte';
   import '@xterm/xterm/css/xterm.css';
-  import type { TerminalChunk, TerminalSnapshot, Worker } from './types';
+  import type { TerminalChunk, TerminalSession, TerminalSnapshot } from './types';
   import type { UiPreferences } from './ui/preferences';
   import type { TerminalHandle } from './ui/workspace-layout';
   import {
@@ -21,17 +21,17 @@
   } from './api';
 
   interface Props {
-    worker: Worker;
+    terminal: TerminalSession;
     preferences: UiPreferences;
     active?: boolean;
-    onActivate?: (workerId: string) => void;
+    onActivate?: (terminalId: string) => void;
     onError?: (message: string) => void;
-    onReady?: (handle: TerminalHandle | null, identity: TerminalHandle | undefined, workerId: string) => void;
+    onReady?: (handle: TerminalHandle | null, identity: TerminalHandle | undefined, terminalId: string) => void;
   }
 
-  let { worker, preferences, active = false, onActivate, onError, onReady }: Props = $props();
-  const workerId = untrack(() => worker.id);
-  const workerName = untrack(() => worker.name);
+  let { terminal, preferences, active = false, onActivate, onError, onReady }: Props = $props();
+  const terminalId = untrack(() => terminal.id);
+  const terminalName = untrack(() => terminal.name);
 
   // Orca defaults: Ghostty Default Style Dark / Builtin Tango Light.
   const DARK_TERMINAL_THEME: ITheme = {
@@ -125,7 +125,7 @@
   let pageVisible = $state(
     typeof document === 'undefined' ? true : document.visibilityState === 'visible',
   );
-  let lastPid = untrack(() => worker.pid);
+  let lastPid = untrack(() => terminal.pid);
   let connecting = $state(false);
   let failure = $state<string | null>(null);
   let shellBackground = $state<string>('#282c34');
@@ -261,7 +261,7 @@
     try {
       return await navigator.clipboard.readText();
     } catch (error) {
-      report(`Terminal ${workerName}: clipboard read was denied. ${errorMessage(error)}`);
+      report(`Terminal ${terminalName}: clipboard read was denied. ${errorMessage(error)}`);
       return null;
     }
   }
@@ -302,9 +302,9 @@
   function sendToPty(data: string): void {
     if (disposed || !attached) return;
     const gen = generation;
-    void writeTerminal(worker.id, data).catch((error) => {
+    void writeTerminal(terminalId, data).catch((error) => {
       if (disposed || gen !== generation) return;
-      report(`Terminal ${workerName}: input was not delivered. ${errorMessage(error)}`);
+      report(`Terminal ${terminalName}: input was not delivered. ${errorMessage(error)}`);
     });
   }
 
@@ -339,13 +339,13 @@
     sentCols = cols;
     sentRows = rows;
     const gen = generation;
-    void resizeTerminal(worker.id, cols, rows).catch((error) => {
+    void resizeTerminal(terminalId, cols, rows).catch((error) => {
       if (disposed || gen !== generation) return;
       if (sentCols === cols && sentRows === rows) {
         sentCols = previousCols;
         sentRows = previousRows;
       }
-      report(`Terminal ${workerName}: resize was not applied. ${errorMessage(error)}`);
+      report(`Terminal ${terminalName}: resize was not applied. ${errorMessage(error)}`);
     });
   }
 
@@ -364,12 +364,12 @@
     if (end <= ackedEnd) return;
     ackInFlight = true;
     try {
-      await ackTerminal(worker.id, end);
+      await ackTerminal(terminalId, end);
       if (gen === generation) ackedEnd = Math.max(ackedEnd, end);
     } catch (error) {
       if (disposed || gen !== generation) return;
       ackFailed = true;
-      const message = `Terminal ${workerName}: output acknowledgement failed. The session is stalled until it reconnects. ${errorMessage(error)}`;
+      const message = `Terminal ${terminalName}: output acknowledgement failed. The session is stalled until it reconnects. ${errorMessage(error)}`;
       if (failure === null) {
         failure = message;
         report(message);
@@ -400,7 +400,7 @@
     if (!gapReported) {
       gapReported = true;
       report(
-        `Terminal ${workerName}: older output was discarded by the output ring. The display was reset so the missing bytes are not hidden.`,
+        `Terminal ${terminalName}: older output was discarded by the output ring. The display was reset so the missing bytes are not hidden.`,
       );
     }
   }
@@ -423,7 +423,7 @@
       if (!gapReported) {
         gapReported = true;
         report(
-          `Terminal ${workerName}: received an output span with no new bytes (${chunk.start}-${chunk.end}).`,
+          `Terminal ${terminalName}: received an output span with no new bytes (${chunk.start}-${chunk.end}).`,
         );
       }
       return;
@@ -462,7 +462,7 @@
     pending = [];
     pendingBytes = 0;
     report(
-      `Terminal ${workerName}: the local output queue exceeded its bound and was dropped. Reattaching to resynchronise from the backend buffer.`,
+      `Terminal ${terminalName}: the local output queue exceeded its bound and was dropped. Reattaching to resynchronise from the backend buffer.`,
     );
     queueMicrotask(() => {
       overflowResetting = false;
@@ -569,17 +569,17 @@
     });
 
     instance.open(surface);
-    instance.textarea?.setAttribute('aria-label', `Terminal for ${workerName}`);
+    instance.textarea?.setAttribute('aria-label', `Terminal for ${terminalName}`);
     instance.options.disableStdin = true;
 
     dataDisposable = instance.onData((data) => {
       if (!attached || disposed) return;
       const sendGen = generation;
-      void writeTerminal(worker.id, data).catch((error) => {
+      void writeTerminal(terminalId, data).catch((error) => {
         if (disposed || sendGen !== generation) return;
         if (inputErrorShown) return;
         inputErrorShown = true;
-        report(`Terminal ${workerName}: input was not delivered. ${errorMessage(error)}`);
+        report(`Terminal ${terminalName}: input was not delivered. ${errorMessage(error)}`);
       });
     });
 
@@ -605,7 +605,7 @@
     sentCols = cols;
     sentRows = rows;
 
-    const attach = attachTerminal(worker.id, cols, rows, (chunk) => receive(chunk, gen));
+    const attach = attachTerminal(terminalId, cols, rows, (chunk) => receive(chunk, gen));
     lease = attach.lease;
 
     try {
@@ -639,7 +639,7 @@
         releaseLease();
         return;
       }
-      const message = `Terminal ${workerName}: ${errorMessage(error)}`;
+      const message = `Terminal ${terminalName}: ${errorMessage(error)}`;
       failure = message;
       report(message);
       instance.options.disableStdin = true;
@@ -654,14 +654,14 @@
       if (disposed) return;
       connecting = false;
       attached = false;
-      const message = `Terminal ${workerName}: ${errorMessage(error)}`;
+      const message = `Terminal ${terminalName}: ${errorMessage(error)}`;
       failure = message;
       report(message);
     });
   }
 
   function onActivateWorker(): void {
-    onActivate?.(worker.id);
+    onActivate?.(terminalId);
   }
 
   function releaseLease(): void {
@@ -670,7 +670,7 @@
     if (!current) return;
     void detachTerminal(current).catch((error) => {
       console.warn(
-        `Terminal ${workerName}: detach after a failed attach was not confirmed. ${errorMessage(error)}`,
+        `Terminal ${terminalName}: detach after a failed attach was not confirmed. ${errorMessage(error)}`,
       );
     });
   }
@@ -734,7 +734,7 @@
     destroyTerminal();
     if (current) {
       void detachTerminal(current).catch((error) => {
-        const message = `Terminal ${workerName}: detach failed. ${errorMessage(error)}`;
+        const message = `Terminal ${terminalName}: detach failed. ${errorMessage(error)}`;
         if (disposed) console.warn(message);
         else report(message);
       });
@@ -812,7 +812,7 @@
   });
 
   onMount(() => {
-    onReady?.(terminalHandle,undefined,workerId);
+    onReady?.(terminalHandle, undefined, terminalId);
     pageVisible = document.visibilityState === 'visible';
     const onVisibility = () => {
       pageVisible = document.visibilityState === 'visible';
@@ -863,7 +863,7 @@
   });
 
   $effect(() => {
-    const pid = worker.pid;
+    const pid = terminal.pid;
     if (pid === lastPid) return;
     lastPid = pid;
     if (pid === null) return;
@@ -878,7 +878,7 @@
   onDestroy(() => {
     disposed = true;
     generation += 1;
-    onReady?.(null,terminalHandle,workerId);
+    onReady?.(null, terminalHandle, terminalId);
     if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler);
     visibilityHandler = null;
     intersectionObserver?.disconnect();
@@ -897,7 +897,7 @@
     destroyTerminal();
     if (current) {
       void detachTerminal(current).catch((error) => {
-        console.warn(`Terminal ${workerName}: detach failed. ${errorMessage(error)}`);
+        console.warn(`Terminal ${terminalName}: detach failed. ${errorMessage(error)}`);
       });
     }
   });

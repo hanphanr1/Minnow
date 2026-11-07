@@ -1,4 +1,4 @@
-import type { Worker } from '../types';
+import type { TerminalSession, Worker } from '../types';
 import type { UiPreferences } from './preferences';
 
 export type SplitDirection = 'horizontal' | 'vertical';
@@ -11,9 +11,9 @@ export interface WorkspaceGroup {
   activeTabId: string | null;
 }
 
-/** A terminal pane inside one tab. Worker IDs are real backend workers. */
+/** A terminal pane inside one tab. Terminal IDs are real backend terminals. */
 export type PaneNode =
-  | { type: 'leaf'; workerId: string }
+  | { type: 'leaf'; terminalId: string }
   | {
       type: 'split';
       direction: SplitDirection;
@@ -24,10 +24,10 @@ export type PaneNode =
 
 export interface WorkspaceTab {
   id: string;
-  /** Primary worker (first leaf) kept for stable lookup and legacy migrations. */
-  workerId: string;
+  /** Primary terminal (first leaf) kept for stable lookup and legacy migrations. */
+  terminalId: string;
   panes: PaneNode;
-  focusedWorkerId: string;
+  focusedTerminalId: string;
   title: string | null;
   color: string | null;
   pinned: boolean;
@@ -44,9 +44,9 @@ export type LayoutNode =
     };
 
 export interface ClosedTabEntry {
-  workerId: string;
+  terminalId: string;
   panes: PaneNode;
-  focusedWorkerId: string;
+  focusedTerminalId: string;
   title: string | null;
   color: string | null;
   pinned: boolean;
@@ -57,17 +57,16 @@ export interface ClosedTabEntry {
 /** A single pane expanded to fill its tab body; mutually exclusive with group maximize. */
 export interface MaximizedPane {
   tabId: string;
-  workerId: string;
+  terminalId: string;
 }
 
 export interface WorkspaceSnapshot {
-  version: 2;
+  version: 3;
   tabs: WorkspaceTab[];
   groups: WorkspaceGroup[];
   layout: LayoutNode;
   activeGroupId: string;
   recentTabIds: string[];
-  dismissedWorkerIds: string[];
   closedTabs: ClosedTabEntry[];
   maximizedGroupId: string | null;
   maximizedPane: MaximizedPane | null;
@@ -112,8 +111,8 @@ export type WorkerAction = 'restart' | 'stop' | 'editor' | 'diff' | 'merge' | 'd
 
 export interface WorkspaceApi {
   activateTab(tabId: string): void;
-  activateWorker(workerId: string): void;
-  focusPane(workerId: string): void;
+  activateTerminal(terminalId: string): void;
+  focusPane(terminalId: string): void;
   closeTab(tabId: string): void;
   closeOtherTabs(tabId: string): void;
   closeGroup(groupId: string): void;
@@ -125,14 +124,14 @@ export interface WorkspaceApi {
   cancelRename(): void;
   moveTabToGroup(tabId: string, groupId: string, index?: number): void;
   moveTabToNewGroup(tabId: string, groupId: string, direction: DropPosition): void;
-  splitWithNewWorker(groupId: string, direction: 'right' | 'down'): void;
+  splitWithNewTerminal(groupId: string, direction: 'right' | 'down'): void;
   createTerminal(): void;
   reopenClosedTab(): void;
   focusGroup(groupId: string): void;
   setRatio(path: string, ratio: number): void;
   setPaneRatio(tabId: string, path: string, ratio: number): void;
-  closePane(tabId: string, workerId: string): void;
-  openPaneMenu(event: MouseEvent, tabId: string, workerId: string): void;
+  closePane(tabId: string, terminalId: string): void;
+  openPaneMenu(event: MouseEvent, tabId: string, terminalId: string): void;
   equalizePanes(): void;
   toggleMaximize(groupId: string): void;
   beginTabDrag(event: PointerEvent, tabId: string): void;
@@ -143,11 +142,11 @@ export interface WorkspaceApi {
   openTerminalMenu(event: MouseEvent, groupId: string): void;
   copyText(text: string, label: string): void;
   registerTerminal(
-    workerId: string,
+    terminalId: string,
     handle: TerminalHandle | null,
     identity?: TerminalHandle,
   ): void;
-  handleFor(workerId: string): TerminalHandle | undefined;
+  handleFor(terminalId: string): TerminalHandle | undefined;
   isClickSuppressed(): boolean;
   showToast(message: string): void;
 }
@@ -156,7 +155,8 @@ export interface WorkspaceView {
   snapshot: WorkspaceSnapshot;
   ui: WorkspaceUi;
   preferences: UiPreferences;
-  workerById: Map<string, Worker>;
+  worker: Worker;
+  terminalById: Map<string, TerminalSession>;
   tabById: Map<string, WorkspaceTab>;
   activeGroupId: string;
   hasSplits: boolean;
@@ -165,7 +165,7 @@ export interface WorkspaceView {
   sidebarVisible: boolean;
   allowTerminalFocus: boolean;
   activeTab: WorkspaceTab | null;
-  activeWorker: Worker | null;
+  activeTerminal: TerminalSession | null;
   onError: (message: string) => void;
 }
 
@@ -188,7 +188,8 @@ export const TAB_COLORS = [
 export const MIN_RATIO = 0.15;
 export const MAX_RATIO = 0.85;
 
-const STORAGE_PREFIX = 'minnow.orca.workspace.v1.';
+const STORAGE_PREFIX = 'minnow.orca.workspace.v3.';
+const LEGACY_STORAGE_PREFIX = 'minnow.orca.workspace.v1.';
 const MAX_RECENT_TABS = 24;
 const MAX_CLOSED_TABS = 12;
 
@@ -204,31 +205,48 @@ export function clampRatio(value: number): number {
   return Math.min(MAX_RATIO, Math.max(MIN_RATIO, value));
 }
 
-export function createSnapshot(workers: Worker[], activeWorkerId: string | null): WorkspaceSnapshot {
-  const group: WorkspaceGroup = { id: newId('group'), tabIds: [], activeTabId: null };
-  const snapshot: WorkspaceSnapshot = {
-    version: 2,
+/** A terminal is worth showing automatically while it can still run or is running. */
+export function isTerminalTabCandidate(terminal: TerminalSession): boolean {
+  if (terminal.closed) return false;
+  return terminal.status !== 'exited' || terminal.desired_running;
+}
+
+/** Live enough that closing it is a process action, not just a UI cleanup. */
+export function isTerminalLive(terminal: TerminalSession): boolean {
+  return !terminal.closed && (terminal.status !== 'exited' || terminal.desired_running);
+}
+
+function emptySnapshot(group: WorkspaceGroup): WorkspaceSnapshot {
+  return {
+    version: 3,
     tabs: [],
     groups: [group],
     layout: { type: 'leaf', groupId: group.id },
     activeGroupId: group.id,
     recentTabIds: [],
-    dismissedWorkerIds: [],
     closedTabs: [],
     maximizedGroupId: null,
     maximizedPane: null,
   };
-  for (const worker of workers) {
-    if (worker.status === 'exited' || (worker.pid === null && !worker.desired_running)) continue;
-    const tab = addWorkerTab(snapshot, worker.id, group.id);
-    if (tab !== null && group.activeTabId === null) group.activeTabId = tab;
+}
+
+export function createSnapshot(
+  terminals: TerminalSession[],
+  activeTerminalId: string | null,
+): WorkspaceSnapshot {
+  const group: WorkspaceGroup = { id: newId('group'), tabIds: [], activeTabId: null };
+  const snapshot = emptySnapshot(group);
+  for (const terminal of terminals) {
+    if (!isTerminalTabCandidate(terminal)) continue;
+    const tabId = addTerminalTab(snapshot, terminal.id, group.id);
+    if (tabId !== null && group.activeTabId === null) group.activeTabId = tabId;
   }
-  const preferred = activeWorkerId
-    ? (snapshot.tabs.find((tab) => tabHasWorker(tab, activeWorkerId)) ?? null)
+  const preferred = activeTerminalId
+    ? (snapshot.tabs.find((tab) => tabHasTerminal(tab, activeTerminalId)) ?? null)
     : null;
   if (preferred) {
     group.activeTabId = preferred.id;
-    preferred.focusedWorkerId = activeWorkerId ?? preferred.workerId;
+    preferred.focusedTerminalId = activeTerminalId ?? preferred.terminalId;
     markRecent(snapshot, preferred.id);
   }
   return snapshot;
@@ -236,24 +254,32 @@ export function createSnapshot(workers: Worker[], activeWorkerId: string | null)
 
 export function loadSnapshot(
   projectId: string,
-  workers: Worker[],
-  activeWorkerId: string | null,
+  workerId: string,
+  terminals: TerminalSession[],
+  activeTerminalId: string | null,
 ): WorkspaceSnapshot {
-  const stored = readStored(projectId);
-  const snapshot = stored ?? createSnapshot(workers, activeWorkerId);
-  reconcileWorkers(snapshot, workers);
+  const stored = readStored(projectId, workerId);
+  const migrated = stored === null ? migrateLegacy(projectId, workerId, terminals) : null;
+  const snapshot =
+    stored ?? migrated ?? createSnapshot(terminals, activeTerminalId);
+  if (stored === null) saveSnapshot(projectId, workerId, snapshot);
+  reconcileTerminals(snapshot, terminals);
   return snapshot;
 }
 
-export function saveSnapshot(projectId: string, snapshot: WorkspaceSnapshot): void {
+export function saveSnapshot(
+  projectId: string,
+  workerId: string,
+  snapshot: WorkspaceSnapshot,
+): void {
   if (typeof localStorage === 'undefined') return;
   const payload: WorkspaceSnapshot = {
-    version: 2,
+    version: 3,
     tabs: snapshot.tabs.map((tab) => ({
       id: tab.id,
-      workerId: tab.workerId,
-      panes: clonePane(tab.panes ?? paneLeaf(tab.workerId)),
-      focusedWorkerId: tab.focusedWorkerId || tab.workerId,
+      terminalId: tab.terminalId,
+      panes: clonePane(tab.panes ?? paneLeaf(tab.terminalId)),
+      focusedTerminalId: tab.focusedTerminalId || tab.terminalId,
       title: tab.title,
       color: tab.color,
       pinned: tab.pinned,
@@ -266,25 +292,28 @@ export function saveSnapshot(projectId: string, snapshot: WorkspaceSnapshot): vo
     layout: cloneLayout(snapshot.layout),
     activeGroupId: snapshot.activeGroupId,
     recentTabIds: [...snapshot.recentTabIds],
-    dismissedWorkerIds: [...snapshot.dismissedWorkerIds],
     closedTabs: snapshot.closedTabs.map((entry) => ({
       ...entry,
-      panes: clonePane(entry.panes ?? paneLeaf(entry.workerId)),
+      panes: clonePane(entry.panes ?? paneLeaf(entry.terminalId)),
     })),
     maximizedGroupId: snapshot.maximizedGroupId,
     maximizedPane: snapshot.maximizedPane ? { ...snapshot.maximizedPane } : null,
   };
   try {
-    localStorage.setItem(STORAGE_PREFIX + projectId, JSON.stringify(payload));
+    localStorage.setItem(storageKey(projectId, workerId), JSON.stringify(payload));
   } catch {
     // A full or unavailable store must not break the workspace.
   }
 }
 
-function readStored(projectId: string): WorkspaceSnapshot | null {
+function storageKey(projectId: string, workerId: string): string {
+  return `${STORAGE_PREFIX}${projectId}.${workerId}`;
+}
+
+function readStored(projectId: string, workerId: string): WorkspaceSnapshot | null {
   if (typeof localStorage === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + projectId);
+    const raw = localStorage.getItem(storageKey(projectId, workerId));
     if (!raw) return null;
     return parseSnapshot(JSON.parse(raw));
   } catch {
@@ -351,12 +380,12 @@ export function equalizeLayout(node: LayoutNode): LayoutNode {
   };
 }
 
-export function paneLeaf(workerId: string): PaneNode {
-  return { type: 'leaf', workerId };
+export function paneLeaf(terminalId: string): PaneNode {
+  return { type: 'leaf', terminalId };
 }
 
 export function clonePane(node: PaneNode): PaneNode {
-  if (node.type === 'leaf') return { type: 'leaf', workerId: node.workerId };
+  if (node.type === 'leaf') return { type: 'leaf', terminalId: node.terminalId };
   return {
     type: 'split',
     direction: node.direction,
@@ -366,37 +395,37 @@ export function clonePane(node: PaneNode): PaneNode {
   };
 }
 
-export function paneWorkerIds(node: PaneNode): string[] {
-  if (node.type === 'leaf') return [node.workerId];
-  return [...paneWorkerIds(node.first), ...paneWorkerIds(node.second)];
+export function paneTerminalIds(node: PaneNode): string[] {
+  if (node.type === 'leaf') return [node.terminalId];
+  return [...paneTerminalIds(node.first), ...paneTerminalIds(node.second)];
 }
 
-export function paneFirstWorker(node: PaneNode): string | null {
-  if (node.type === 'leaf') return node.workerId;
-  return paneFirstWorker(node.first);
+export function paneFirstTerminal(node: PaneNode): string | null {
+  if (node.type === 'leaf') return node.terminalId;
+  return paneFirstTerminal(node.first);
 }
 
-export function paneHasWorker(node: PaneNode, workerId: string): boolean {
-  return paneWorkerIds(node).includes(workerId);
+export function paneHasTerminal(node: PaneNode, terminalId: string): boolean {
+  return paneTerminalIds(node).includes(terminalId);
 }
 
 export function replacePaneLeaf(
   node: PaneNode,
-  workerId: string,
+  terminalId: string,
   replacement: PaneNode,
 ): PaneNode {
-  if (node.type === 'leaf') return node.workerId === workerId ? replacement : node;
+  if (node.type === 'leaf') return node.terminalId === terminalId ? replacement : node;
   return {
     ...node,
-    first: replacePaneLeaf(node.first, workerId, replacement),
-    second: replacePaneLeaf(node.second, workerId, replacement),
+    first: replacePaneLeaf(node.first, terminalId, replacement),
+    second: replacePaneLeaf(node.second, terminalId, replacement),
   };
 }
 
-export function removePaneLeaf(node: PaneNode, workerId: string): PaneNode | null {
-  if (node.type === 'leaf') return node.workerId === workerId ? null : node;
-  const first = removePaneLeaf(node.first, workerId);
-  const second = removePaneLeaf(node.second, workerId);
+export function removePaneLeaf(node: PaneNode, terminalId: string): PaneNode | null {
+  if (node.type === 'leaf') return node.terminalId === terminalId ? null : node;
+  const first = removePaneLeaf(node.first, terminalId);
+  const second = removePaneLeaf(node.second, terminalId);
   if (first === null) return second;
   if (second === null) return first;
   return { ...node, first, second };
@@ -424,45 +453,47 @@ export function equalizePane(node: PaneNode): PaneNode {
 
 export function splitPane(
   node: PaneNode,
-  targetWorkerId: string,
-  newWorkerId: string,
+  targetTerminalId: string,
+  newTerminalId: string,
   direction: 'right' | 'down',
 ): PaneNode {
-  const target: PaneNode = { type: 'leaf', workerId: targetWorkerId };
+  const target: PaneNode = { type: 'leaf', terminalId: targetTerminalId };
   const replacement: PaneNode = {
     type: 'split',
     direction: direction === 'right' ? 'horizontal' : 'vertical',
     first: target,
-    second: { type: 'leaf', workerId: newWorkerId },
+    second: { type: 'leaf', terminalId: newTerminalId },
     ratio: 0.5,
   };
-  return replacePaneLeaf(node, targetWorkerId, replacement);
+  return replacePaneLeaf(node, targetTerminalId, replacement);
 }
 
 /** Normalises legacy/partial tab data so callers can always traverse the pane tree. */
 export function normalizeTab(tab: WorkspaceTab): void {
-  if (!tab.panes || !('type' in tab.panes)) tab.panes = paneLeaf(tab.workerId);
-  const ids = paneWorkerIds(tab.panes);
-  if (ids.length === 0) tab.panes = paneLeaf(tab.workerId);
-  const workers = paneWorkerIds(tab.panes);
-  tab.workerId = workers[0];
-  if (!tab.focusedWorkerId || !workers.includes(tab.focusedWorkerId)) {
-    tab.focusedWorkerId = workers[0];
+  if (!tab.panes || !('type' in tab.panes)) tab.panes = paneLeaf(tab.terminalId);
+  const ids = paneTerminalIds(tab.panes);
+  if (ids.length === 0) tab.panes = paneLeaf(tab.terminalId);
+  const terminalIds = paneTerminalIds(tab.panes);
+  tab.terminalId = terminalIds[0];
+  if (!tab.focusedTerminalId || !terminalIds.includes(tab.focusedTerminalId)) {
+    tab.focusedTerminalId = terminalIds[0];
   }
 }
 
-export function tabWorkerIds(tab: WorkspaceTab): string[] {
-  if (!tab.panes || !('type' in tab.panes)) return [tab.workerId];
-  return paneWorkerIds(tab.panes);
+export function tabTerminalIds(tab: WorkspaceTab): string[] {
+  if (!tab.panes || !('type' in tab.panes)) return [tab.terminalId];
+  return paneTerminalIds(tab.panes);
 }
 
-export function tabHasWorker(tab: WorkspaceTab, workerId: string): boolean {
-  return tabWorkerIds(tab).includes(workerId);
+export function tabHasTerminal(tab: WorkspaceTab, terminalId: string): boolean {
+  return tabTerminalIds(tab).includes(terminalId);
 }
 
-export function tabFocusWorker(tab: WorkspaceTab): string {
-  const workers = tabWorkerIds(tab);
-  return workers.includes(tab.focusedWorkerId) ? tab.focusedWorkerId : (workers[0] ?? tab.workerId);
+export function tabFocusTerminal(tab: WorkspaceTab): string {
+  const terminalIds = tabTerminalIds(tab);
+  return terminalIds.includes(tab.focusedTerminalId)
+    ? tab.focusedTerminalId
+    : (terminalIds[0] ?? tab.terminalId);
 }
 
 /**
@@ -472,14 +503,14 @@ export function tabFocusWorker(tab: WorkspaceTab): string {
 export function isPaneMaximizeValid(snapshot: WorkspaceSnapshot, value: MaximizedPane): boolean {
   if (snapshot.maximizedGroupId !== null) return false;
   const tab = tabById(snapshot, value.tabId);
-  if (!tab || !tabHasWorker(tab, value.workerId)) return false;
-  if (tab.focusedWorkerId !== value.workerId) return false;
-  return tabWorkerIds(tab).length > 1;
+  if (!tab || !tabHasTerminal(tab, value.terminalId)) return false;
+  if (tab.focusedTerminalId !== value.terminalId) return false;
+  return tabTerminalIds(tab).length > 1;
 }
 
-/** Removes one pane worker. Returns false when the tab has no remaining panes. */
-export function removePaneFromTab(tab: WorkspaceTab, workerId: string): boolean {
-  const next = removePaneLeaf(tab.panes ?? paneLeaf(tab.workerId), workerId);
+/** Removes one pane terminal. Returns false when the tab has no remaining panes. */
+export function removePaneFromTab(tab: WorkspaceTab, terminalId: string): boolean {
+  const next = removePaneLeaf(tab.panes ?? paneLeaf(tab.terminalId), terminalId);
   if (next === null) return false;
   tab.panes = next;
   normalizeTab(tab);
@@ -502,8 +533,11 @@ export function tabById(snapshot: WorkspaceSnapshot, tabId: string): WorkspaceTa
   return snapshot.tabs.find((tab) => tab.id === tabId) ?? null;
 }
 
-export function tabByWorker(snapshot: WorkspaceSnapshot, workerId: string): WorkspaceTab | null {
-  return snapshot.tabs.find((tab) => tabHasWorker(tab, workerId)) ?? null;
+export function tabByTerminal(
+  snapshot: WorkspaceSnapshot,
+  terminalId: string,
+): WorkspaceTab | null {
+  return snapshot.tabs.find((tab) => tabHasTerminal(tab, terminalId)) ?? null;
 }
 
 export function groupContainingTab(snapshot: WorkspaceSnapshot, tabId: string): WorkspaceGroup | null {
@@ -548,21 +582,21 @@ export function adjacentGroupId(
   return order[next] ?? null;
 }
 
-export function addWorkerTab(
+export function addTerminalTab(
   snapshot: WorkspaceSnapshot,
-  workerId: string,
+  terminalId: string,
   groupId: string,
   index?: number,
 ): string | null {
-  const existing = tabByWorker(snapshot, workerId);
+  const existing = tabByTerminal(snapshot, terminalId);
   if (existing) return existing.id;
   const group = groupById(snapshot, groupId);
   if (!group) return null;
   const tab: WorkspaceTab = {
     id: newId('tab'),
-    workerId,
-    panes: paneLeaf(workerId),
-    focusedWorkerId: workerId,
+    terminalId,
+    panes: paneLeaf(terminalId),
+    focusedTerminalId: terminalId,
     title: null,
     color: null,
     pinned: false,
@@ -728,33 +762,6 @@ export function moveTabToNewGroup(
   return true;
 }
 
-export function splitWithWorker(
-  snapshot: WorkspaceSnapshot,
-  workerId: string,
-  targetGroupId: string,
-  direction: 'right' | 'down',
-): boolean {
-  const target = groupById(snapshot, targetGroupId);
-  if (!target) return false;
-  const existing = tabByWorker(snapshot, workerId);
-  let tabId = existing?.id ?? null;
-  if (tabId === null) {
-    tabId = addWorkerTab(snapshot, workerId, targetGroupId);
-  } else {
-    const source = groupContainingTab(snapshot, tabId);
-    if (!source) return false;
-    if (source.id !== targetGroupId && !moveTab(snapshot, tabId, targetGroupId)) return false;
-  }
-  if (tabId === null) return false;
-  return moveTabToNewGroup(
-    snapshot,
-    tabId,
-    targetGroupId,
-    direction === 'right' ? 'right' : 'down',
-    true,
-  );
-}
-
 export function markRecent(snapshot: WorkspaceSnapshot, tabId: string): void {
   snapshot.recentTabIds = [tabId, ...snapshot.recentTabIds.filter((id) => id !== tabId)].slice(
     0,
@@ -766,32 +773,33 @@ export function pushClosedTab(snapshot: WorkspaceSnapshot, entry: ClosedTabEntry
   snapshot.closedTabs = [entry, ...snapshot.closedTabs].slice(0, MAX_CLOSED_TABS);
 }
 
-export function dismissWorker(snapshot: WorkspaceSnapshot, workerId: string): void {
-  if (!snapshot.dismissedWorkerIds.includes(workerId)) snapshot.dismissedWorkerIds.push(workerId);
-}
-
-export function undismissWorker(snapshot: WorkspaceSnapshot, workerId: string): void {
-  snapshot.dismissedWorkerIds = snapshot.dismissedWorkerIds.filter((id) => id !== workerId);
-}
-
-function prunePaneWorkers(node: PaneNode, ids: Set<string>): PaneNode | null {
-  if (node.type === 'leaf') return ids.has(node.workerId) ? node : null;
-  const first = prunePaneWorkers(node.first, ids);
-  const second = prunePaneWorkers(node.second, ids);
+function prunePaneTerminals(node: PaneNode, ids: Set<string>): PaneNode | null {
+  if (node.type === 'leaf') return ids.has(node.terminalId) ? node : null;
+  const first = prunePaneTerminals(node.first, ids);
+  const second = prunePaneTerminals(node.second, ids);
   if (first === null) return second;
   if (second === null) return first;
   return { ...node, first, second };
 }
 
-export function reconcileWorkers(snapshot: WorkspaceSnapshot, workers: Worker[]): void {
-  const ids = new Set(workers.map((worker) => worker.id));
+/**
+ * Keeps the persisted layout truthful for one worktree: panes whose terminal
+ * record disappeared are dropped, duplicate terminal panes across tabs are
+ * removed, and still-live terminals that have no tab gain one. Closed
+ * terminals never become automatic tabs.
+ */
+export function reconcileTerminals(
+  snapshot: WorkspaceSnapshot,
+  terminals: TerminalSession[],
+): void {
+  const ids = new Set(terminals.map((terminal) => terminal.id));
 
   for (const tab of [...snapshot.tabs]) {
     normalizeTab(tab);
     let empty = false;
-    for (const workerId of tabWorkerIds(tab)) {
-      if (ids.has(workerId)) continue;
-      if (!removePaneFromTab(tab, workerId)) {
+    for (const terminalId of tabTerminalIds(tab)) {
+      if (ids.has(terminalId)) continue;
+      if (!removePaneFromTab(tab, terminalId)) {
         removeTab(snapshot, tab.id);
         empty = true;
         break;
@@ -802,56 +810,46 @@ export function reconcileWorkers(snapshot: WorkspaceSnapshot, workers: Worker[])
 
   snapshot.closedTabs = snapshot.closedTabs
     .map((entry) => {
-      const panes = prunePaneWorkers(entry.panes ?? paneLeaf(entry.workerId), ids);
+      const panes = prunePaneTerminals(entry.panes ?? paneLeaf(entry.terminalId), ids);
       if (panes === null) return null;
-      const paneIds = paneWorkerIds(panes);
+      const paneIds = paneTerminalIds(panes);
       return {
         ...entry,
-        workerId: paneIds[0],
+        terminalId: paneIds[0],
         panes,
-        focusedWorkerId: paneIds.includes(entry.focusedWorkerId)
-          ? entry.focusedWorkerId
+        focusedTerminalId: paneIds.includes(entry.focusedTerminalId)
+          ? entry.focusedTerminalId
           : paneIds[0],
       };
     })
     .filter((entry): entry is ClosedTabEntry => entry !== null);
-  snapshot.dismissedWorkerIds = snapshot.dismissedWorkerIds.filter((id) => ids.has(id));
 
   const seen = new Set<string>();
   for (const tab of [...snapshot.tabs]) {
     normalizeTab(tab);
     let removed = false;
-    for (const workerId of tabWorkerIds(tab)) {
-      if (seen.has(workerId)) {
-        if (!removePaneFromTab(tab, workerId)) {
+    for (const terminalId of tabTerminalIds(tab)) {
+      if (seen.has(terminalId)) {
+        if (!removePaneFromTab(tab, terminalId)) {
           removeTab(snapshot, tab.id);
           removed = true;
           break;
         }
       } else {
-        seen.add(workerId);
+        seen.add(terminalId);
       }
     }
     if (!removed) normalizeTab(tab);
   }
 
-  let reopened = false;
-  for (const worker of workers) {
-    if (seen.has(worker.id)) continue;
-    // Exited/stopped workers stay hidden: reconcile never revives them.
-    if (worker.status === 'exited' || (worker.pid === null && !worker.desired_running)) continue;
-    if (snapshot.dismissedWorkerIds.includes(worker.id)) {
-      // A dismissed worker is normally a closed tab (stopped). A still-live
-      // dismissed worker is an orphan from an interrupted split; restore it.
-      undismissWorker(snapshot, worker.id);
-    }
+  for (const terminal of terminals) {
+    if (seen.has(terminal.id) || !isTerminalTabCandidate(terminal)) continue;
     const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
     if (!group) continue;
-    const tabId = addWorkerTab(snapshot, worker.id, group.id);
+    const tabId = addTerminalTab(snapshot, terminal.id, group.id);
     if (tabId) {
-      seen.add(worker.id);
-      if (!reopened && group.activeTabId === null) group.activeTabId = tabId;
-      reopened = true;
+      seen.add(terminal.id);
+      if (group.activeTabId === null) group.activeTabId = tabId;
     }
   }
 
@@ -890,7 +888,7 @@ export function reconcileWorkers(snapshot: WorkspaceSnapshot, workers: Worker[])
 
 function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
   if (typeof raw !== 'object' || raw === null) return null;
-  if (!('version' in raw) || (raw.version !== 1 && raw.version !== 2)) return null;
+  if (!('version' in raw) || raw.version !== 3) return null;
 
   const tabs: WorkspaceTab[] = [];
   if ('tabs' in raw && Array.isArray(raw.tabs)) {
@@ -915,12 +913,12 @@ function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
   }
   if (groups.length !== leaves.size) return null;
   if (tabs.some((tab) => !assigned.has(tab.id))) return null;
-  const workerIds = new Set<string>();
+  const terminalIds = new Set<string>();
   for (const tab of tabs) {
     normalizeTab(tab);
-    for (const workerId of tabWorkerIds(tab)) {
-      if (workerIds.has(workerId)) return null;
-      workerIds.add(workerId);
+    for (const terminalId of tabTerminalIds(tab)) {
+      if (terminalIds.has(terminalId)) return null;
+      terminalIds.add(terminalId);
     }
   }
 
@@ -937,13 +935,6 @@ function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
       if (typeof value === 'string' && tabs.some((tab) => tab.id === value) && !recentTabIds.includes(value)) {
         recentTabIds.push(value);
       }
-    }
-  }
-
-  const dismissedWorkerIds: string[] = [];
-  if ('dismissedWorkerIds' in raw && Array.isArray(raw.dismissedWorkerIds)) {
-    for (const value of raw.dismissedWorkerIds) {
-      if (typeof value === 'string' && !dismissedWorkerIds.includes(value)) dismissedWorkerIds.push(value);
     }
   }
 
@@ -972,27 +963,26 @@ function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
     raw.maximizedPane !== null
   ) {
     const value = raw.maximizedPane as Record<string, unknown>;
-    if (typeof value.tabId === 'string' && typeof value.workerId === 'string') {
+    if (typeof value.tabId === 'string' && typeof value.terminalId === 'string') {
       const tab = tabs.find((candidate) => candidate.id === value.tabId);
       if (
         tab &&
-        tab.focusedWorkerId === value.workerId &&
-        tabWorkerIds(tab).length > 1 &&
-        tabHasWorker(tab, value.workerId)
+        tab.focusedTerminalId === value.terminalId &&
+        tabTerminalIds(tab).length > 1 &&
+        tabHasTerminal(tab, value.terminalId)
       ) {
-        maximizedPane = { tabId: tab.id, workerId: value.workerId };
+        maximizedPane = { tabId: tab.id, terminalId: value.terminalId };
       }
     }
   }
 
   return {
-    version: 2,
+    version: 3,
     tabs,
     groups,
     layout,
     activeGroupId,
     recentTabIds,
-    dismissedWorkerIds,
     closedTabs,
     maximizedGroupId,
     maximizedPane,
@@ -1002,22 +992,22 @@ function parseSnapshot(raw: unknown): WorkspaceSnapshot | null {
 function parseWorkspaceTab(value: unknown): WorkspaceTab | null {
   if (typeof value !== 'object' || value === null) return null;
   if (!('id' in value) || typeof value.id !== 'string') return null;
-  if (!('workerId' in value) || typeof value.workerId !== 'string') return null;
+  if (!('terminalId' in value) || typeof value.terminalId !== 'string') return null;
   const parsed = 'panes' in value ? parsePane(value.panes) : null;
-  const panes = parsed ?? paneLeaf(value.workerId);
-  const workers = paneWorkerIds(panes);
-  if (workers.length === 0 || new Set(workers).size !== workers.length) return null;
+  const panes = parsed ?? paneLeaf(value.terminalId);
+  const terminalIds = paneTerminalIds(panes);
+  if (terminalIds.length === 0 || new Set(terminalIds).size !== terminalIds.length) return null;
   const focused =
-    'focusedWorkerId' in value &&
-    typeof value.focusedWorkerId === 'string' &&
-    workers.includes(value.focusedWorkerId)
-      ? value.focusedWorkerId
-      : workers[0];
+    'focusedTerminalId' in value &&
+    typeof value.focusedTerminalId === 'string' &&
+    terminalIds.includes(value.focusedTerminalId)
+      ? value.focusedTerminalId
+      : terminalIds[0];
   return {
     id: value.id,
-    workerId: workers[0],
+    terminalId: terminalIds[0],
     panes,
-    focusedWorkerId: focused,
+    focusedTerminalId: focused,
     title: 'title' in value && typeof value.title === 'string' ? value.title : null,
     color: 'color' in value && typeof value.color === 'string' ? value.color : null,
     pinned: 'pinned' in value && value.pinned === true,
@@ -1028,8 +1018,8 @@ function parsePane(raw: unknown): PaneNode | null {
   if (typeof raw !== 'object' || raw === null) return null;
   if (!('type' in raw)) return null;
   if (raw.type === 'leaf') {
-    if (!('workerId' in raw) || typeof raw.workerId !== 'string') return null;
-    return { type: 'leaf', workerId: raw.workerId };
+    if (!('terminalId' in raw) || typeof raw.terminalId !== 'string') return null;
+    return { type: 'leaf', terminalId: raw.terminalId };
   }
   if (raw.type !== 'split') return null;
   if (!('direction' in raw) || (raw.direction !== 'horizontal' && raw.direction !== 'vertical')) {
@@ -1071,21 +1061,21 @@ function parseGroup(
 
 function parseClosedTab(value: unknown, fallbackGroupId: string): ClosedTabEntry | null {
   if (typeof value !== 'object' || value === null) return null;
-  if (!('workerId' in value) || typeof value.workerId !== 'string') return null;
+  if (!('terminalId' in value) || typeof value.terminalId !== 'string') return null;
   const parsed = 'panes' in value ? parsePane(value.panes) : null;
-  const panes = parsed ?? paneLeaf(value.workerId);
-  const workers = paneWorkerIds(panes);
-  if (workers.length === 0 || new Set(workers).size !== workers.length) return null;
+  const panes = parsed ?? paneLeaf(value.terminalId);
+  const terminalIds = paneTerminalIds(panes);
+  if (terminalIds.length === 0 || new Set(terminalIds).size !== terminalIds.length) return null;
   const focused =
-    'focusedWorkerId' in value &&
-    typeof value.focusedWorkerId === 'string' &&
-    workers.includes(value.focusedWorkerId)
-      ? value.focusedWorkerId
-      : workers[0];
+    'focusedTerminalId' in value &&
+    typeof value.focusedTerminalId === 'string' &&
+    terminalIds.includes(value.focusedTerminalId)
+      ? value.focusedTerminalId
+      : terminalIds[0];
   return {
-    workerId: workers[0],
+    terminalId: terminalIds[0],
     panes,
-    focusedWorkerId: focused,
+    focusedTerminalId: focused,
     title: 'title' in value && typeof value.title === 'string' ? value.title : null,
     color: 'color' in value && typeof value.color === 'string' ? value.color : null,
     pinned: 'pinned' in value && value.pinned === true,
@@ -1114,6 +1104,202 @@ function parseLayout(raw: unknown): LayoutNode | null {
   if (!first || !second) return null;
   const ratio = 'ratio' in raw && typeof raw.ratio === 'number' ? clampRatio(raw.ratio) : 0.5;
   return { type: 'split', direction: raw.direction, first, second, ratio };
+}
+
+/*
+ * Legacy project-level layouts described panes by worker id. Only the selected
+ * worker's own primary pane/tab survives migration; foreign-worktree leaves and
+ * splits are collapsed instead of being reinterpreted as shared terminals.
+ */
+
+interface LegacyPaneLeaf { type: 'leaf'; workerId: string }
+type LegacyPaneNode =
+  | LegacyPaneLeaf
+  | {
+      type: 'split';
+      direction: SplitDirection;
+      first: LegacyPaneNode;
+      second: LegacyPaneNode;
+      ratio: number;
+    };
+
+interface LegacyTab {
+  id: string;
+  workerId: string;
+  panes: LegacyPaneNode;
+  focusedWorkerId: string;
+  title: string | null;
+  color: string | null;
+  pinned: boolean;
+}
+
+interface LegacyClosedTab {
+  workerId: string;
+  panes: LegacyPaneNode;
+  focusedWorkerId: string;
+  title: string | null;
+  color: string | null;
+  pinned: boolean;
+  index: number;
+}
+
+interface LegacySnapshot {
+  tabs: LegacyTab[];
+  closedTabs: LegacyClosedTab[];
+}
+
+function migrateLegacy(
+  projectId: string,
+  workerId: string,
+  terminals: TerminalSession[],
+): WorkspaceSnapshot | null {
+  if (typeof localStorage === 'undefined') return null;
+  let raw: unknown;
+  try {
+    const stored = localStorage.getItem(LEGACY_STORAGE_PREFIX + projectId);
+    if (!stored) return null;
+    raw = JSON.parse(stored);
+  } catch {
+    return null;
+  }
+  const legacy = parseLegacySnapshot(raw);
+  if (!legacy) return null;
+  const ids = new Set(terminals.map((terminal) => terminal.id));
+  if (!ids.has(workerId)) return null;
+  const tab = legacy.tabs.find((candidate) =>
+    legacyPaneWorkerIds(candidate.panes).includes(workerId),
+  );
+  if (!tab) return null;
+
+  const group: WorkspaceGroup = { id: newId('group'), tabIds: [], activeTabId: null };
+  const snapshot = emptySnapshot(group);
+  group.tabIds = [tab.id];
+  group.activeTabId = tab.id;
+  snapshot.tabs = [
+    {
+      id: tab.id,
+      terminalId: workerId,
+      panes: paneLeaf(workerId),
+      focusedTerminalId: workerId,
+      title: tab.title,
+      color: tab.color,
+      pinned: tab.pinned,
+    },
+  ];
+  snapshot.recentTabIds = [tab.id];
+
+  for (const entry of legacy.closedTabs) {
+    if (!ids.has(entry.workerId)) continue;
+    if (!legacyPaneWorkerIds(entry.panes).includes(workerId)) continue;
+    snapshot.closedTabs.push({
+      terminalId: workerId,
+      panes: paneLeaf(workerId),
+      focusedTerminalId: workerId,
+      title: entry.title,
+      color: entry.color,
+      pinned: entry.pinned,
+      groupId: group.id,
+      index: entry.index,
+    });
+    if (snapshot.closedTabs.length >= MAX_CLOSED_TABS) break;
+  }
+  return snapshot;
+}
+
+function parseLegacySnapshot(raw: unknown): LegacySnapshot | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (!('version' in raw) || (raw.version !== 1 && raw.version !== 2)) return null;
+  const tabs: LegacyTab[] = [];
+  if ('tabs' in raw && Array.isArray(raw.tabs)) {
+    for (const value of raw.tabs) {
+      const tab = parseLegacyTab(value);
+      if (tab) tabs.push(tab);
+    }
+  }
+  const closedTabs: LegacyClosedTab[] = [];
+  if ('closedTabs' in raw && Array.isArray(raw.closedTabs)) {
+    for (const value of raw.closedTabs) {
+      const entry = parseLegacyClosedTab(value);
+      if (entry) closedTabs.push(entry);
+    }
+  }
+  return { tabs, closedTabs };
+}
+
+function parseLegacyTab(value: unknown): LegacyTab | null {
+  if (typeof value !== 'object' || value === null) return null;
+  if (!('id' in value) || typeof value.id !== 'string') return null;
+  if (!('workerId' in value) || typeof value.workerId !== 'string') return null;
+  const parsed = 'panes' in value ? parseLegacyPane(value.panes) : null;
+  const panes = parsed ?? { type: 'leaf', workerId: value.workerId };
+  const workerIds = legacyPaneWorkerIds(panes);
+  if (workerIds.length === 0) return null;
+  const focused =
+    'focusedWorkerId' in value &&
+    typeof value.focusedWorkerId === 'string' &&
+    workerIds.includes(value.focusedWorkerId)
+      ? value.focusedWorkerId
+      : workerIds[0];
+  return {
+    id: value.id,
+    workerId: workerIds[0],
+    panes,
+    focusedWorkerId: focused,
+    title: 'title' in value && typeof value.title === 'string' ? value.title : null,
+    color: 'color' in value && typeof value.color === 'string' ? value.color : null,
+    pinned: 'pinned' in value && value.pinned === true,
+  };
+}
+
+function parseLegacyClosedTab(value: unknown): LegacyClosedTab | null {
+  if (typeof value !== 'object' || value === null) return null;
+  if (!('workerId' in value) || typeof value.workerId !== 'string') return null;
+  const parsed = 'panes' in value ? parseLegacyPane(value.panes) : null;
+  const panes = parsed ?? { type: 'leaf', workerId: value.workerId };
+  const workerIds = legacyPaneWorkerIds(panes);
+  if (workerIds.length === 0) return null;
+  const focused =
+    'focusedWorkerId' in value &&
+    typeof value.focusedWorkerId === 'string' &&
+    workerIds.includes(value.focusedWorkerId)
+      ? value.focusedWorkerId
+      : workerIds[0];
+  return {
+    workerId: workerIds[0],
+    panes,
+    focusedWorkerId: focused,
+    title: 'title' in value && typeof value.title === 'string' ? value.title : null,
+    color: 'color' in value && typeof value.color === 'string' ? value.color : null,
+    pinned: 'pinned' in value && value.pinned === true,
+    index:
+      'index' in value && typeof value.index === 'number' && Number.isFinite(value.index)
+        ? value.index
+        : 0,
+  };
+}
+
+function parseLegacyPane(raw: unknown): LegacyPaneNode | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  if (!('type' in raw)) return null;
+  if (raw.type === 'leaf') {
+    if (!('workerId' in raw) || typeof raw.workerId !== 'string') return null;
+    return { type: 'leaf', workerId: raw.workerId };
+  }
+  if (raw.type !== 'split') return null;
+  if (!('direction' in raw) || (raw.direction !== 'horizontal' && raw.direction !== 'vertical')) {
+    return null;
+  }
+  if (!('first' in raw) || !('second' in raw)) return null;
+  const first = parseLegacyPane(raw.first);
+  const second = parseLegacyPane(raw.second);
+  if (!first || !second) return null;
+  const ratio = 'ratio' in raw && typeof raw.ratio === 'number' ? clampRatio(raw.ratio) : 0.5;
+  return { type: 'split', direction: raw.direction, first, second, ratio };
+}
+
+function legacyPaneWorkerIds(node: LegacyPaneNode): string[] {
+  if (node.type === 'leaf') return [node.workerId];
+  return [...legacyPaneWorkerIds(node.first), ...legacyPaneWorkerIds(node.second)];
 }
 
 export function isTextEntryTarget(target: EventTarget | null): boolean {

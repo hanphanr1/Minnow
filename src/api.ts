@@ -5,6 +5,8 @@ import type {
   Settings,
   Snapshot,
   TerminalChunk,
+  TerminalKind,
+  TerminalSession,
   TerminalSnapshot,
   Worker,
 } from './types';
@@ -55,16 +57,42 @@ export function saveSettings(settings: Settings): Promise<Settings> {
   return invoke<Settings>('save_settings', { settings });
 }
 
-export function writeTerminal(workerId: string, data: string): Promise<void> {
-  return invoke<void>('write_terminal', { workerId, data });
+export function createTerminal(
+  workerId: string,
+  sourceTerminalId: string | null,
+  kind: TerminalKind,
+): Promise<TerminalSession> {
+  return invoke<TerminalSession>('create_terminal', { workerId, sourceTerminalId, kind });
 }
 
-export function resizeTerminal(workerId: string, cols: number, rows: number): Promise<void> {
-  return invoke<void>('resize_terminal', { workerId, cols, rows });
+export function restartTerminal(terminalId: string): Promise<TerminalSession> {
+  return invoke<TerminalSession>('restart_terminal', { terminalId });
 }
 
-export function ackTerminal(workerId: string, end: number): Promise<void> {
-  return invoke<void>('ack_terminal', { workerId, end });
+/** Stops the process but keeps the terminal record and its visible output. */
+export function killTerminal(terminalId: string): Promise<TerminalSession> {
+  return invoke<TerminalSession>('kill_terminal', { terminalId });
+}
+
+/** Stops the process, marks the terminal closed and keeps its identity for reopen. */
+export function closeTerminal(terminalId: string): Promise<TerminalSession> {
+  return invoke<TerminalSession>('close_terminal', { terminalId });
+}
+
+export function terminalCwd(terminalId: string): Promise<string> {
+  return invoke<string>('terminal_cwd', { terminalId });
+}
+
+export function writeTerminal(terminalId: string, data: string): Promise<void> {
+  return invoke<void>('write_terminal', { terminalId, data });
+}
+
+export function resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void> {
+  return invoke<void>('resize_terminal', { terminalId, cols, rows });
+}
+
+export function ackTerminal(terminalId: string, end: number): Promise<void> {
+  return invoke<void>('ack_terminal', { terminalId, end });
 }
 
 export function listenWorkerUpdated(handler: (worker: Worker) => void): Promise<UnlistenFn> {
@@ -73,6 +101,16 @@ export function listenWorkerUpdated(handler: (worker: Worker) => void): Promise<
 
 export function listenWorkerRemoved(handler: (workerId: string) => void): Promise<UnlistenFn> {
   return listen<string>('worker-removed', (event) => handler(event.payload));
+}
+
+export function listenTerminalUpdated(
+  handler: (terminal: TerminalSession) => void,
+): Promise<UnlistenFn> {
+  return listen<TerminalSession>('terminal-updated', (event) => handler(event.payload));
+}
+
+export function listenTerminalRemoved(handler: (terminalId: string) => void): Promise<UnlistenFn> {
+  return listen<string>('terminal-removed', (event) => handler(event.payload));
 }
 
 /**
@@ -86,6 +124,27 @@ export async function subscribeWorkerEvents(
   const unlistenUpdated = await listenWorkerUpdated(onUpdated);
   try {
     const unlistenRemoved = await listenWorkerRemoved(onRemoved);
+    return () => {
+      unlistenUpdated();
+      unlistenRemoved();
+    };
+  } catch (error) {
+    unlistenUpdated();
+    throw error;
+  }
+}
+
+/**
+ * Subscribes to terminal update and removal events. Same disposable contract as
+ * subscribeWorkerEvents so the root can queue terminal events before bootstrap.
+ */
+export async function subscribeTerminalEvents(
+  onUpdated: (terminal: TerminalSession) => void,
+  onRemoved: (terminalId: string) => void,
+): Promise<UnlistenFn> {
+  const unlistenUpdated = await listenTerminalUpdated(onUpdated);
+  try {
+    const unlistenRemoved = await listenTerminalRemoved(onRemoved);
     return () => {
       unlistenUpdated();
       unlistenRemoved();
@@ -124,7 +183,7 @@ export function isAttachSuperseded(error: unknown): boolean {
 }
 
 export interface TerminalLease {
-  readonly workerId: string;
+  readonly terminalId: string;
   readonly id: number;
 }
 
@@ -138,20 +197,20 @@ const latestLeases = new Map<string, TerminalLease>();
 const terminalTails = new Map<string, Promise<void>>();
 
 /**
- * Runs terminal subscription commands for one worker in call order. A detach
- * queued before a newer attach therefore lands before that attach, and a
- * detach queued after it can be recognised as stale before it reaches Rust.
+ * Runs terminal subscription commands for one terminal in call order. A detach
+ * queued before a newer attach therefore lands before that attach, and a detach
+ * queued after it can be recognised as stale before it reaches Rust.
  */
-function enqueueTerminal<T>(workerId: string, task: () => Promise<T>): Promise<T> {
-  const previous = terminalTails.get(workerId) ?? Promise.resolve();
+function enqueueTerminal<T>(terminalId: string, task: () => Promise<T>): Promise<T> {
+  const previous = terminalTails.get(terminalId) ?? Promise.resolve();
   const run = previous.then(task, task);
   const settled = run.then(
     () => undefined,
     () => undefined,
   );
-  terminalTails.set(workerId, settled);
+  terminalTails.set(terminalId, settled);
   void settled.then(() => {
-    if (terminalTails.get(workerId) === settled) terminalTails.delete(workerId);
+    if (terminalTails.get(terminalId) === settled) terminalTails.delete(terminalId);
   });
   return run;
 }
@@ -161,17 +220,17 @@ function enqueueTerminal<T>(workerId: string, task: () => Promise<T>): Promise<T
  * that happens while the snapshot is in flight can detach the right session.
  */
 export function attachTerminal(
-  workerId: string,
+  terminalId: string,
   cols: number,
   rows: number,
   onOutput: (chunk: TerminalChunk) => void,
 ): TerminalAttach {
-  const lease: TerminalLease = { workerId, id: ++leaseCounter };
-  const previous = latestLeases.get(workerId);
-  latestLeases.set(workerId, lease);
+  const lease: TerminalLease = { terminalId, id: ++leaseCounter };
+  const previous = latestLeases.get(terminalId);
+  latestLeases.set(terminalId, lease);
 
-  const snapshot = enqueueTerminal(workerId, async () => {
-    const latest = latestLeases.get(workerId);
+  const snapshot = enqueueTerminal(terminalId, async () => {
+    const latest = latestLeases.get(terminalId);
     if (latest === undefined || latest.id !== lease.id) {
       throw new AttachSupersededError();
     }
@@ -180,14 +239,14 @@ export function attachTerminal(
     // race two attach calls, even when the old teardown detach was skipped.
     if (previous !== undefined && previous.id !== lease.id) {
       try {
-        await invoke<void>('detach_terminal', { workerId });
+        await invoke<void>('detach_terminal', { terminalId });
       } catch (error) {
         // The previous lease may never have reached an attached state.
         console.info('Previous terminal subscription was already gone.', error);
       }
     }
 
-    const latestAfterDetach = latestLeases.get(workerId);
+    const latestAfterDetach = latestLeases.get(terminalId);
     if (latestAfterDetach === undefined || latestAfterDetach.id !== lease.id) {
       throw new AttachSupersededError();
     }
@@ -195,7 +254,7 @@ export function attachTerminal(
     const channel = new Channel<TerminalChunk>();
     channel.onmessage = onOutput;
     return invoke<TerminalSnapshot>('attach_terminal', {
-      workerId,
+      terminalId,
       cols,
       rows,
       onOutput: channel,
@@ -211,11 +270,11 @@ export function attachTerminal(
  * skipped when a newer lease exists, so a stale pair cannot attach at all.
  */
 export function detachTerminal(lease: TerminalLease): Promise<void> {
-  const latest = latestLeases.get(lease.workerId);
+  const latest = latestLeases.get(lease.terminalId);
   if (latest !== undefined && latest.id > lease.id) {
     return Promise.resolve();
   }
-  return enqueueTerminal(lease.workerId, () =>
-    invoke<void>('detach_terminal', { workerId: lease.workerId }),
+  return enqueueTerminal(lease.terminalId, () =>
+    invoke<void>('detach_terminal', { terminalId: lease.terminalId }),
   );
 }

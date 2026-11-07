@@ -7,7 +7,7 @@ mod projects;
 mod workspace;
 mod workspace_watch;
 
-use model::{Project, Settings, Snapshot, Worker};
+use model::{Project, Settings, Snapshot, TerminalSession, Worker};
 use pty::{Manager as WorkerManager, TerminalChunk, TerminalSnapshot};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{ipc::Channel, Manager, State};
@@ -154,13 +154,13 @@ async fn create_workers(engine: State<'_, Engine>, project_id: String, count: u3
 #[tauri::command]
 async fn restart_worker(engine: State<'_, Engine>, worker_id: String) -> Result<Worker, String> {
     let engine = engine.inner().clone();
-    blocking(move || engine.restart(&worker_id)).await
+    blocking(move || engine.restart_worker(&worker_id)).await
 }
 
 #[tauri::command]
 async fn kill_worker(engine: State<'_, Engine>, worker_id: String) -> Result<Worker, String> {
     let engine = engine.inner().clone();
-    blocking(move || engine.kill(&worker_id)).await
+    blocking(move || engine.kill_worker(&worker_id)).await
 }
 
 #[tauri::command]
@@ -194,29 +194,58 @@ async fn save_settings(engine: State<'_, Engine>, settings: Settings) -> Result<
 }
 
 #[tauri::command]
-fn attach_terminal(engine: State<'_, Engine>, worker_id: String, cols: u16, rows: u16, on_output: Channel<TerminalChunk>) -> Result<TerminalSnapshot, String> {
-    engine.attach(&worker_id, cols, rows, on_output)
-}
-
-#[tauri::command]
-fn detach_terminal(engine: State<'_, Engine>, worker_id: String) -> Result<(), String> {
-    engine.detach(&worker_id)
-}
-
-#[tauri::command]
-fn resize_terminal(engine: State<'_, Engine>, worker_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    engine.resize(&worker_id, cols, rows)
-}
-
-#[tauri::command]
-async fn write_terminal(engine: State<'_, Engine>, worker_id: String, data: String) -> Result<(), String> {
+async fn create_terminal(engine: State<'_, Engine>, worker_id: String, source_terminal_id: Option<String>, kind: String) -> Result<TerminalSession, String> {
     let engine = engine.inner().clone();
-    blocking(move || engine.write(&worker_id, &data)).await
+    blocking(move || engine.create_terminal(&worker_id, source_terminal_id.as_deref(), &kind)).await
 }
 
 #[tauri::command]
-fn ack_terminal(engine: State<'_, Engine>, worker_id: String, end: u64) -> Result<(), String> {
-    engine.ack(&worker_id, end)
+async fn restart_terminal(engine: State<'_, Engine>, terminal_id: String) -> Result<TerminalSession, String> {
+    let engine = engine.inner().clone();
+    blocking(move || engine.restart_terminal(&terminal_id)).await
+}
+
+#[tauri::command]
+async fn kill_terminal(engine: State<'_, Engine>, terminal_id: String) -> Result<TerminalSession, String> {
+    let engine = engine.inner().clone();
+    blocking(move || engine.kill_terminal(&terminal_id)).await
+}
+
+#[tauri::command]
+async fn close_terminal(engine: State<'_, Engine>, terminal_id: String) -> Result<TerminalSession, String> {
+    let engine = engine.inner().clone();
+    blocking(move || engine.close_terminal(&terminal_id)).await
+}
+
+#[tauri::command]
+fn terminal_cwd(engine: State<'_, Engine>, terminal_id: String) -> Result<String, String> {
+    engine.terminal_cwd(&terminal_id)
+}
+
+#[tauri::command]
+fn attach_terminal(engine: State<'_, Engine>, terminal_id: String, cols: u16, rows: u16, on_output: Channel<TerminalChunk>) -> Result<TerminalSnapshot, String> {
+    engine.attach(&terminal_id, cols, rows, on_output)
+}
+
+#[tauri::command]
+fn detach_terminal(engine: State<'_, Engine>, terminal_id: String) -> Result<(), String> {
+    engine.detach(&terminal_id)
+}
+
+#[tauri::command]
+fn resize_terminal(engine: State<'_, Engine>, terminal_id: String, cols: u16, rows: u16) -> Result<(), String> {
+    engine.resize(&terminal_id, cols, rows)
+}
+
+#[tauri::command]
+async fn write_terminal(engine: State<'_, Engine>, terminal_id: String, data: String) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    blocking(move || engine.write(&terminal_id, &data)).await
+}
+
+#[tauri::command]
+fn ack_terminal(engine: State<'_, Engine>, terminal_id: String, end: u64) -> Result<(), String> {
+    engine.ack(&terminal_id, end)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -250,6 +279,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap, add_project, create_workers, restart_worker, kill_worker,
             delete_worker, diff_worker, merge_worker, open_editor, save_settings,
+            create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,
             pick_project_folder, create_project, clone_project,
             list_workspace_directory, read_workspace_file, write_workspace_file, search_workspace,

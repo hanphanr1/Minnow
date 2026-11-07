@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import type { Component } from 'svelte';
   import { PanelLeft, PanelRight, X, GitBranch, Bell, Plug, Monitor, TriangleAlert, Check, TerminalSquare, GitCompareArrows, Plus, ArrowLeft } from 'lucide-svelte';
   import Sidebar from './ui/Sidebar.svelte';
@@ -11,8 +11,8 @@
   import ProjectAdmission from './ui/ProjectAdmission.svelte';
   import WindowControls from './ui/WindowControls.svelte';
   import { loadPreferences, preferenceKey, type UiPreferences } from './ui/preferences';
-  import type { Project, Settings, Worker } from './types';
-  import { bootstrap, createWorkers, deleteWorker, diffWorker, errorMessage, isDesktop, killWorker, mergeWorker, openEditor, restartWorker, saveSettings, subscribeWorkerEvents } from './api';
+  import type { Project, Settings, TerminalKind, TerminalSession, Worker } from './types';
+  import { bootstrap, closeTerminal, createTerminal as createTerminalApi, createWorkers, deleteWorker, diffWorker, errorMessage, isDesktop, killTerminal, killWorker, mergeWorker, openEditor, restartTerminal, restartWorker, saveSettings, subscribeTerminalEvents, subscribeWorkerEvents } from './api';
   import { getWorkspaceFileDiff } from './workspace-api';
   import { watchWorkspace } from './workspace-watch';
 
@@ -20,10 +20,14 @@
   const desktop = isDesktop();
   let projects = $state<Project[]>([]);
   let workers = $state<Worker[]>([]);
+  /** Every terminal of every worktree, keyed by terminal id; closed records included. */
+  let terminals = $state<TerminalSession[]>([]);
   let settings = $state<Settings>({ omp_path: 'omp', default_worker_count: 1 });
   let preferences = $state<UiPreferences>(loadPreferences());
   let selectedProjectId = $state<string|null>(null);
   let activeWorkerId = $state<string|null>(null);
+  /** Focused terminal inside the selected worktree; never a worktree identity. */
+  let activeTerminalId = $state<string|null>(null);
   let page = $state('terminal');
   let sidebarVisible = $state(true);
   let rightVisible = $state(true);
@@ -56,7 +60,7 @@
   let diffViewLoading = $state(false);
   let diffViewError = $state<string|null>(null);
   let sidebar = $state<{ focusList(): void; toggleCollapsedProjects(): void }>();
-  let workspace = $state<{ handleShortcut(event: KeyboardEvent): boolean; focusActive(): void }>();
+  let workspace = $state<{ handleShortcut(event: KeyboardEvent): boolean; focusActive(): void; createTerminal(kind?: TerminalKind): Promise<void>; activateTerminal(terminalId: string): void }>();
   let history = $state<{projectId:string;workerId?:string}[]>([]);
   let historyIndex = $state(-1);
   let toasts = $state<{id:number;message:string;error:boolean}[]>([]);
@@ -69,10 +73,12 @@
   let hydrating = true;
   let starting = false;
   let unlisten: (() => void) | undefined;
-  const queued: ({worker:Worker}|{id:string})[] = [];
+  let unlistenTerminals: (() => void) | undefined;
+  const queued: ({worker:Worker}|{id:string}|{terminal:TerminalSession}|{terminalId:string})[] = [];
   const project = $derived(projects.find(p => p.id === selectedProjectId) ?? null);
   const projectWorkers = $derived(workers.filter(w => w.project_id === selectedProjectId));
   const worker = $derived(workers.find(w => w.id === activeWorkerId) ?? null);
+  const workerTerminals = $derived(terminals.filter(t => t.worker_id === activeWorkerId));
   const diffTarget = $derived(workers.find(w => w.id === diffWorkerId) ?? null);
 
   function notify(message:string, error = false) {
@@ -84,7 +90,18 @@
     const exists = workers.some(w => w.id === value.id);
     workers = exists ? workers.map(w => w.id === value.id ? value : w) : [...workers,value];
   }
+  function applyTerminal(value:TerminalSession) {
+    const exists = terminals.some(t => t.id === value.id);
+    terminals = exists ? terminals.map(t => t.id === value.id ? value : t) : [...terminals,value];
+    return value;
+  }
+  /** Only for a record that was really deleted. A close keeps its record (closed = true). */
+  function removeTerminal(id:string) {
+    terminals = terminals.filter(t => t.id !== id);
+    if (activeTerminalId === id) activeTerminalId = null;
+  }
   function removeWorker(id:string) {
+    terminals = terminals.filter(t => t.worker_id !== id);
     workers = workers.filter(w => w.id !== id);
     if (activeWorkerId === id) activeWorkerId = workers.find(w => w.project_id === selectedProjectId)?.id ?? null;
     if (diffWorkerId === id) { diffWorkerId = null; diffOpen = false; diff = null; }
@@ -92,7 +109,9 @@
   async function select(projectId:string,workerId?:string,record = true) {
     if (!(await leaveFile())) return;
     selectedProjectId = projectId;
-    activeWorkerId = workerId ?? workers.find(w => w.project_id === projectId)?.id ?? null;
+    const nextWorkerId = workerId ?? workers.find(w => w.project_id === projectId)?.id ?? null;
+    if (nextWorkerId !== activeWorkerId) activeTerminalId = null;
+    activeWorkerId = nextWorkerId;
     page = 'terminal'; diffOpen = false; diffRequest = null;
     if (record) {
       const previous = history[historyIndex];
@@ -122,16 +141,30 @@
         if (disposed) { remove(); return; }
         unlisten = remove;
       }
+      if (!unlistenTerminals) {
+        const remove = await subscribeTerminalEvents(
+          value => { if (hydrating) queued.push({terminal:value}); else applyTerminal(value); },
+          terminalId => { if (hydrating) queued.push({terminalId}); else removeTerminal(terminalId); },
+        );
+        if (disposed) { remove(); return; }
+        unlistenTerminals = remove;
+      }
       const value = await bootstrap();
       if (disposed) return;
-      projects = value.projects; workers = value.workers; settings = value.settings;
-      for (const event of queued) { if ('worker' in event) applyWorker(event.worker); else removeWorker(event.id); }
+      projects = value.projects; workers = value.workers; terminals = value.terminals; settings = value.settings;
+      for (const event of queued) {
+        if ('worker' in event) applyWorker(event.worker);
+        else if ('terminal' in event) applyTerminal(event.terminal);
+        else if ('terminalId' in event) removeTerminal(event.terminalId);
+        else removeWorker(event.id);
+      }
       queued.length = 0;
       try {
         const saved = JSON.parse(localStorage.getItem('minnow.orca.selection') ?? 'null');
         if (saved && projects.some(item => item.id === saved.projectId)) {
           selectedProjectId = saved.projectId;
-          activeWorkerId = workers.find(item => item.id === saved.workerId && item.project_id === saved.projectId)?.id ?? null;
+          activeWorkerId = workers.find(item => item.id === saved.workerId && item.project_id === saved.projectId)?.id
+            ?? workers.find(item => item.project_id === saved.projectId)?.id ?? null;
         }
       } catch { /* An unavailable or obsolete UI selection does not block the workspace. */ }
     } catch (error) { if (!disposed) bootError = errorMessage(error); }
@@ -143,13 +176,24 @@
     for (const value of values) applyWorker(value);
     await select(projectId,values[0]?.id); createOpen = keepOpen;
   }
-  async function newTerminal():Promise<Worker|null> {
-    if (!project) return null;
+  /** New Terminal from a file or diff view: a shell in the selected worktree, never a new worktree. */
+  async function newTerminal():Promise<TerminalSession|null> {
+    const target = worker;
+    if (!target) return null;
     if (!(await leaveFile())) return null;
-    const values = await createWorkers(project.id,1,'');
-    for (const value of values) applyWorker(value);
-    activeWorkerId = values[0]?.id ?? activeWorkerId;
-    return values[0] ?? null;
+    return applyTerminal(await createTerminalApi(target.id,null,'shell'));
+  }
+  async function showNewTerminal() {
+    const created = await newTerminal();
+    if (!created) return;
+    fileTarget = null; diffOpen = false; page = 'terminal';
+    await tick();
+    workspace?.activateTerminal(created.id);
+  }
+  async function createWorkspaceTerminal(kind:TerminalKind,sourceTerminalId:string|null):Promise<TerminalSession> {
+    const target = worker;
+    if (!target) throw new Error('Select a workspace before creating a terminal.');
+    return applyTerminal(await createTerminalApi(target.id,sourceTerminalId,kind));
   }
   async function leaveFile():Promise<boolean> {
     const previous = fileTarget;
@@ -328,12 +372,12 @@
     if (event.ctrlKey && event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key)) { event.preventDefault(); navigate(event.key === 'ArrowLeft' ? -1 : 1); return; }
     if (fileTarget) {
       if (event.ctrlKey && key === 'w') { event.preventDefault(); void leaveFile(); }
-      else if (event.ctrlKey && key === 't') { event.preventDefault(); void newTerminal().catch(error => notify(errorMessage(error),true)); }
+      else if (event.ctrlKey && key === 't') { event.preventDefault(); void showNewTerminal().catch(error => notify(errorMessage(error),true)); }
       return;
     }
     if (diffOpen) {
       if (event.ctrlKey && key === 'w') { event.preventDefault(); diffOpen = false; }
-      else if (event.ctrlKey && key === 't') { event.preventDefault(); void newTerminal().then(() => { diffOpen = false; }).catch(error => notify(errorMessage(error),true)); }
+      else if (event.ctrlKey && key === 't') { event.preventDefault(); void showNewTerminal().catch(error => notify(errorMessage(error),true)); }
       return;
     }
     if (page === 'terminal') workspace?.handleShortcut(event);
@@ -366,7 +410,7 @@
     const themeChanged = () => { systemDark = media.matches; }; media.addEventListener('change',themeChanged);
     void start();
     window.addEventListener('keydown',globalKeys,true);
-    return () => { disposed = true; unlisten?.(); media.removeEventListener('change',themeChanged); window.removeEventListener('keydown',globalKeys,true); for (const timer of timers) clearTimeout(timer); };
+    return () => { disposed = true; unlisten?.(); unlistenTerminals?.(); media.removeEventListener('change',themeChanged); window.removeEventListener('keydown',globalKeys,true); for (const timer of timers) clearTimeout(timer); };
   });
 </script>
 
@@ -405,7 +449,7 @@
         </aside>
       {/if}
       <main id="workspace" class="shell-main">
-        {#if page !== 'terminal' || !project || projectWorkers.length === 0 || booting || bootError}
+        {#if page !== 'terminal' || !project || !worker || booting || bootError}
           <div class="titlebar" data-tauri-drag-region>
             {#if !effectiveSidebar}<button class="mn-icon-button ml-2" aria-label="Toggle sidebar" title="Toggle sidebar (Ctrl+B)" onclick={toggleSidebar}><PanelLeft size={16}/></button>{/if}
             <span class="flex-1" data-tauri-drag-region></span>
@@ -432,7 +476,7 @@
               {#if !effectiveSidebar}<button class="mn-icon-button ml-2" aria-label="Toggle sidebar" title="Toggle sidebar (Ctrl+B)" onclick={toggleSidebar}><PanelLeft size={16}/></button>{/if}
               <button class="flex h-full min-w-36 max-w-[300px] flex-1 items-center gap-1.5 border-r border-border bg-tab-inactive px-2 text-xs text-muted-foreground hover:text-foreground" onclick={() => { diffOpen = false; }}><TerminalSquare size={12}/><span class="truncate">{diffTarget.name}</span></button>
               <div class="flex h-full min-w-36 max-w-[300px] flex-1 items-center gap-1.5 border-r border-b-2 border-border border-b-foreground bg-tab-active px-2 text-xs"><GitCompareArrows size={12}/><span class="min-w-0 flex-1 truncate">Changes (diff)</span><button class="mn-icon-button" aria-label="Close diff tab" onclick={() => { diffOpen = false; }}><X size={12}/></button></div>
-              <button class="mn-icon-button mx-2" aria-label="New terminal" title="New terminal (Ctrl+T)" onclick={() => { void newTerminal().then(() => { diffOpen = false; }).catch(error => notify(errorMessage(error),true)); }}><Plus size={14}/></button>
+              <button class="mn-icon-button mx-2" aria-label="New terminal" title="New terminal (Ctrl+T)" onclick={() => { void showNewTerminal().catch(error => notify(errorMessage(error),true)); }}><Plus size={14}/></button>
               <span class="flex-1" data-tauri-drag-region></span>
               {#if !effectiveRight}<button class="mn-icon-button mr-2" aria-label="Toggle right sidebar" title="Toggle right sidebar (Ctrl+L)" onclick={toggleRightSidebar}><PanelRight size={16}/></button><div class="window-controls-titlebar-spacer"></div>{/if}
             </div>
@@ -450,8 +494,8 @@
                 <p class="text-sm text-muted-foreground">Preparing the changes viewer.</p>
               </div>
             {/if}
-          {:else if project && projectWorkers.length > 0}
-            <Workspace bind:this={workspace} {project} workers={projectWorkers} {activeWorkerId} {preferences} onActivate={id => { activeWorkerId = id; }} onCreate={newTerminal} onStop={async target => { applyWorker(await killWorker(target.id)); }} onAction={(kind,value) => { void action(kind,value); }} onFeature={feature} onError={message => notify(message,true)} onToggleSidebar={toggleSidebar} onToggleRightSidebar={toggleRightSidebar} sidebarVisible={effectiveSidebar} rightSidebarVisible={effectiveRight}/>
+          {:else if project && worker}
+            <Workspace bind:this={workspace} {project} {worker} terminals={workerTerminals} {preferences} onActivateTerminal={id => { activeTerminalId = id || null; }} onCreateTerminal={createWorkspaceTerminal} onRestartTerminal={async id => applyTerminal(await restartTerminal(id))} onStopTerminal={async id => applyTerminal(await killTerminal(id))} onCloseTerminal={async id => applyTerminal(await closeTerminal(id))} onStopWorker={async target => { applyWorker(await killWorker(target.id)); }} onAction={(kind,value) => { void action(kind,value); }} onFeature={feature} onError={message => notify(message,true)} onToggleSidebar={toggleSidebar} onToggleRightSidebar={toggleRightSidebar} sidebarVisible={effectiveSidebar} rightSidebarVisible={effectiveRight}/>
           {:else}<Landing hasProjects={projects.length > 0} onAddProject={() => { projectOpen = true; }} onCreate={() => { createOpen = true; }}/>{/if}
         </div>
       </main>

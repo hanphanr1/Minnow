@@ -29,7 +29,7 @@
     Trash2,
     X,
   } from 'lucide-svelte';
-  import type { Project, Worker } from '../types';
+  import type { Project, TerminalKind, TerminalSession, Worker } from '../types';
   import { errorMessage } from '../api';
   import type { UiPreferences } from './preferences';
   import PaneTree from './PaneTree.svelte';
@@ -38,36 +38,36 @@
     TAB_COLORS,
     WS_API,
     WS_VIEW,
-    addWorkerTab,
+    addTerminalTab,
     adjacentGroupId,
     adjacentTabId,
     clampRatio,
     clonePane,
     collapseGroup,
     createSnapshot,
-    dismissWorker,
     equalizePane,
     equalizeLayout,
     groupById,
     groupContainingTab,
     isPaneMaximizeValid,
+    isTerminalLive,
     isTextEntryTarget,
     loadSnapshot,
     markRecent,
     moveTab,
     moveTabToNewGroup as splitTabToNewGroup,
+    paneTerminalIds,
     pushClosedTab,
-    reconcileWorkers,
+    reconcileTerminals,
     removePaneFromTab,
     removeTab,
     saveSnapshot,
     splitPane,
     tabById as findTabById,
-    tabByWorker as findTabForWorker,
-    tabFocusWorker,
-    tabHasWorker,
-    tabWorkerIds,
-    undismissWorker,
+    tabByTerminal as findTabForTerminal,
+    tabFocusTerminal,
+    tabHasTerminal,
+    tabTerminalIds,
     updatePaneRatio,
     updateRatio,
     type ClosedTabEntry,
@@ -86,15 +86,20 @@
 
   interface Props {
     project: Project;
-    workers: Worker[];
-    activeWorkerId: string | null;
+    /** The selected worktree. File and Git panels follow it, not the focused terminal. */
+    worker: Worker;
+    /** This worktree's terminals, including closed records kept for reopen. */
+    terminals: TerminalSession[];
     preferences: UiPreferences;
     sidebarVisible: boolean;
     rightSidebarVisible?: boolean;
-    onActivate: (workerId: string) => void;
-    onCreate: () => Promise<Worker | null>;
+    onActivateTerminal: (terminalId: string) => void;
+    onCreateTerminal: (kind: TerminalKind, sourceTerminalId: string | null) => Promise<TerminalSession>;
+    onRestartTerminal: (terminalId: string) => Promise<TerminalSession>;
+    onStopTerminal: (terminalId: string) => Promise<TerminalSession>;
+    onCloseTerminal: (terminalId: string) => Promise<TerminalSession>;
     onAction: (action: WorkerAction, worker: Worker) => void;
-    onStop?: (worker: Worker) => Promise<void>;
+    onStopWorker?: (worker: Worker) => Promise<void>;
     onFeature: (name: string) => void;
     onError: (message: string) => void;
     onToggleSidebar: () => void;
@@ -103,15 +108,18 @@
 
   let {
     project,
-    workers,
-    activeWorkerId,
+    worker,
+    terminals,
     preferences,
     sidebarVisible,
     rightSidebarVisible = true,
-    onActivate,
-    onCreate,
+    onActivateTerminal,
+    onCreateTerminal,
+    onRestartTerminal,
+    onStopTerminal,
+    onCloseTerminal,
     onAction,
-    onStop,
+    onStopWorker,
     onFeature,
     onError,
     onToggleSidebar,
@@ -149,7 +157,6 @@
     onConfirm: () => void | Promise<void>;
   }
 
-  let projectId = $state<string | null>(null);
   let snapshot = $state<WorkspaceSnapshot>(createSnapshot([], null));
   let ui = $state<WorkspaceUi>({ drag: null, editingTabId: null, toast: null });
   let menu = $state<MenuState | null>(null);
@@ -164,18 +171,21 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let suppressClick = false;
   let suppressClickTimer: ReturnType<typeof setTimeout> | null = null;
-  let projectSettling = false;
+  /** The project/worktree the current layout snapshot describes. Replaced, never mutated. */
+  let scope: { projectId: string; terminalId: string } | null = null;
+  /** Layout work that spans an async terminal call. Automatic tabbing waits for it to end. */
+  let layoutBusy = 0;
 
   const terminalHandles = new Map<string, TerminalHandle>();
 
-  const workerById = $derived(new Map(workers.map((worker) => [worker.id, worker])));
+  const terminalById = $derived(new Map(terminals.map((terminal) => [terminal.id, terminal])));
   const tabById = $derived(new Map(snapshot.tabs.map((tab) => [tab.id, tab])));
   const activeGroup = $derived(groupById(snapshot, snapshot.activeGroupId));
   const activeTab = $derived(
     activeGroup?.activeTabId ? (tabById.get(activeGroup.activeTabId) ?? null) : null,
   );
-  const activeWorker = $derived(
-    activeTab ? (workerById.get(tabFocusWorker(activeTab)) ?? null) : null,
+  const activeTerminal = $derived(
+    activeTab ? (terminalById.get(tabFocusTerminal(activeTab)) ?? null) : null,
   );
   const hasSplits = $derived(snapshot.layout.type === 'split');
   const maximizedGroupId = $derived(snapshot.maximizedGroupId);
@@ -190,8 +200,11 @@
     get preferences() {
       return preferences;
     },
-    get workerById() {
-      return workerById;
+    get worker() {
+      return worker;
+    },
+    get terminalById() {
+      return terminalById;
     },
     get tabById() {
       return tabById;
@@ -217,8 +230,8 @@
     get activeTab() {
       return activeTab;
     },
-    get activeWorker() {
-      return activeWorker;
+    get activeTerminal() {
+      return activeTerminal;
     },
     get onError() {
       return onError;
@@ -226,21 +239,41 @@
   };
 
   function persist(): void {
-    if (projectId !== null) saveSnapshot(projectId, snapshot);
+    if (scope !== null) saveSnapshot(scope.projectId, scope.terminalId, snapshot);
+  }
+
+  /** Drops stale panes and adds tabs for live terminals that have none. */
+  function reconcile(): void {
+    if (scope === null || layoutBusy > 0) return;
+    // Terminal status events arrive constantly; only write storage when the layout really changed.
+    const before = JSON.stringify(snapshot);
+    reconcileTerminals(snapshot, terminals);
+    if (JSON.stringify(snapshot) !== before) persist();
+  }
+
+  function beginLayoutWork(): void {
+    layoutBusy += 1;
+  }
+
+  function endLayoutWork(): void {
+    layoutBusy -= 1;
+    if (layoutBusy === 0) void tick().then(reconcile);
   }
 
   function tabLabel(tab: WorkspaceTab): string {
-    const worker = workerById.get(tab.workerId);
-    return tab.title?.trim() || worker?.name || 'Terminal';
+    const terminal = terminalById.get(tab.terminalId);
+    return tab.title?.trim() || terminal?.name || worker.name || 'Terminal';
   }
 
-  function workerForTab(tab: WorkspaceTab): Worker | null {
-    return workerById.get(tabFocusWorker(tab)) ?? null;
+  function terminalsOfTab(tab: WorkspaceTab): TerminalSession[] {
+    return tabTerminalIds(tab)
+      .map((id) => terminalById.get(id))
+      .filter((terminal): terminal is TerminalSession => terminal !== undefined);
   }
 
-  function isWorkerLive(worker: Worker): boolean {
-    if (worker.status === 'exited') return false;
-    return worker.pid !== null || worker.desired_running;
+  function isWorkerLive(value: Worker): boolean {
+    if (value.status === 'exited') return false;
+    return value.pid !== null || value.desired_running;
   }
 
   /** Drops a pane expansion that no longer matches the visible focused pane. */
@@ -253,31 +286,31 @@
   function isMaximizeTargetActive(groupId: string): boolean {
     if (snapshot.maximizedGroupId === groupId) return true;
     const tab = activeTabForGroup(groupId);
-    if (tab && tabWorkerIds(tab).length > 1) {
+    if (tab && tabTerminalIds(tab).length > 1) {
       const value = snapshot.maximizedPane;
-      return value !== null && value.tabId === tab.id && value.workerId === tabFocusWorker(tab);
+      return value !== null && value.tabId === tab.id && value.terminalId === tabFocusTerminal(tab);
     }
     return false;
   }
 
   function activeHandle(): TerminalHandle | undefined {
-    return activeTab ? terminalHandles.get(tabFocusWorker(activeTab)) : undefined;
+    return activeTab ? terminalHandles.get(tabFocusTerminal(activeTab)) : undefined;
   }
 
-  function activateTabInternal(tabId: string, notifyParent: boolean, workerId?: string): void {
+  function activateTabInternal(tabId: string, notifyParent: boolean, terminalId?: string): void {
     const tab = findTabById(snapshot, tabId);
     if (!tab) return;
     const group = groupContainingTab(snapshot, tabId);
     if (!group) return;
     const focus =
-      workerId && tabWorkerIds(tab).includes(workerId) ? workerId : tabFocusWorker(tab);
-    tab.focusedWorkerId = focus;
+      terminalId && tabTerminalIds(tab).includes(terminalId) ? terminalId : tabFocusTerminal(tab);
+    tab.focusedTerminalId = focus;
     group.activeTabId = tabId;
     snapshot.activeGroupId = group.id;
     clampMaximizedPane();
     markRecent(snapshot, tabId);
     persist();
-    if (notifyParent) onActivate(focus);
+    if (notifyParent) onActivateTerminal(focus);
     void tick().then(() => {
       const handle = terminalHandles.get(focus);
       if (snapshot.activeGroupId === group.id && group.activeTabId === tabId && ui.editingTabId === null) handle?.focus();
@@ -304,18 +337,18 @@
         }
       }
     }
-    onActivate(tab ? tabFocusWorker(tab) : '');
+    onActivateTerminal(tab ? tabFocusTerminal(tab) : '');
   }
 
-  function closeTabNow(tabId: string, notifyParent = true): boolean {
+  /** Records the closed tab for reopen and removes it. The native close already happened. */
+  function finishCloseTab(tabId: string, notifyParent: boolean): boolean {
     const tab = findTabById(snapshot, tabId);
     if (!tab) return false;
     const group = groupContainingTab(snapshot, tabId);
-    const workers = tabWorkerIds(tab);
     const entry: ClosedTabEntry = {
-      workerId: tab.workerId,
+      terminalId: tab.terminalId,
       panes: clonePane(tab.panes),
-      focusedWorkerId: tabFocusWorker(tab),
+      focusedTerminalId: tabFocusTerminal(tab),
       title: tab.title,
       color: tab.color,
       pinned: tab.pinned,
@@ -324,7 +357,6 @@
     };
     pushClosedTab(snapshot, entry);
     removeTab(snapshot, tabId);
-    for (const workerId of workers) dismissWorker(snapshot, workerId);
     if (group && group.tabIds.length === 0 && snapshot.groups.length > 1) {
       // The vanished group is already empty, so collapsing it only repairs the layout.
       collapseGroup(snapshot, group.id);
@@ -334,75 +366,81 @@
     return true;
   }
 
-  async function stopWorkers(workers: Worker[]): Promise<boolean> {
-    for (const worker of workers) {
-      if (!isWorkerLive(worker)) continue;
-      if (!onStop) {
-        onError(`Stopping ${worker.name} requires the workspace stop handler.`);
-        return false;
-      }
+  /**
+   * Stops and marks each terminal closed. A failure leaves the layout alone so the
+   * user still sees the pane and can retry. Records that vanished need no close.
+   */
+  async function closeTerminalsNative(ids: string[]): Promise<boolean> {
+    for (const id of ids) {
+      const terminal = terminalById.get(id);
+      if (!terminal) continue;
       try {
-        // The stop handler resolves only after the backend has recorded the exit,
-        // so the reactive worker snapshot already reflects the stopped state.
-        await onStop(worker);
-        await tick();
-        const current = workerById.get(worker.id);
-        if (current && isWorkerLive(current)) {
-          onError(`${worker.name} is still running; the action was stopped.`);
-          return false;
-        }
+        await onCloseTerminal(id);
       } catch (error) {
-        onError(`${worker.name}: ${errorMessage(error)}`);
+        onError(`${terminal.name}: ${errorMessage(error)}`);
         return false;
       }
     }
     return true;
   }
 
-  function tabWorkers(tab: WorkspaceTab): Worker[] {
-    return tabWorkerIds(tab)
-      .map((id) => workerById.get(id))
-      .filter((worker): worker is Worker => worker !== undefined);
+  async function closeTabNow(tabId: string, notifyParent = true): Promise<boolean> {
+    const tab = findTabById(snapshot, tabId);
+    if (!tab) return false;
+    const started = scope;
+    beginLayoutWork();
+    try {
+      if (!(await closeTerminalsNative(tabTerminalIds(tab)))) return false;
+      if (scope !== started) return false;
+      return finishCloseTab(tabId, notifyParent);
+    } finally {
+      endLayoutWork();
+    }
   }
 
-  async function stopWorkersThenClose(tabId: string, workers: Worker[]): Promise<void> {
-    if (!(await stopWorkers(workers))) return;
-    closeTabNow(tabId);
+  function liveTerminals(tabs: WorkspaceTab[]): TerminalSession[] {
+    return tabs.flatMap(terminalsOfTab).filter(isTerminalLive);
   }
 
   function requestCloseTab(tabId: string): void {
     const tab = findTabById(snapshot, tabId);
     if (!tab) return;
-    const workers = tabWorkers(tab);
-    const live = workers.filter(isWorkerLive);
+    const live = liveTerminals([tab]);
+    const closeIt = async (): Promise<void> => {
+      await closeTabNow(tabId);
+    };
     if (tab.pinned) {
       confirmState = {
         title: 'Close pinned tab',
         message: live.length
-          ? `${tabLabel(tab)} is pinned and ${live.length} pane worker${live.length === 1 ? ' is' : 's are'} still running. Closing stops those terminal processes; worktrees and history are kept.`
+          ? `${tabLabel(tab)} is pinned and ${live.length} terminal${live.length === 1 ? ' is' : 's are'} still running. Closing stops ${live.length === 1 ? 'it' : 'them'}; the worktree and session history are kept.`
           : `${tabLabel(tab)} is pinned. Close it anyway?`,
         confirmLabel: live.length ? 'Stop and close' : 'Close tab',
         danger: live.length > 0,
-        onConfirm:
-          live.length > 0
-            ? () => stopWorkersThenClose(tabId, workers)
-            : () => {
-                closeTabNow(tabId);
-              },
+        onConfirm: closeIt,
       };
       return;
     }
     if (live.length > 0) {
       confirmState = {
-        title: 'Stop panes and close tab',
-        message: `Closing ${tabLabel(tab)} stops ${live.length} running pane terminal${live.length === 1 ? '' : 's'}. The worktree, branch and session history are kept.`,
+        title: 'Stop terminals and close tab',
+        message: `Closing ${tabLabel(tab)} stops ${live.length} running terminal${live.length === 1 ? '' : 's'}. The worktree, branch and session history are kept.`,
         confirmLabel: 'Stop and close',
         danger: true,
-        onConfirm: () => stopWorkersThenClose(tabId, workers),
+        onConfirm: closeIt,
       };
       return;
     }
-    closeTabNow(tabId);
+    void closeIt();
+  }
+
+  /** Closes tabs one by one; returns how many could not be closed. */
+  async function closeTabsNow(tabs: WorkspaceTab[]): Promise<number> {
+    let failed = 0;
+    for (const tab of tabs) {
+      if (!(await closeTabNow(tab.id, false))) failed += 1;
+    }
+    return failed;
   }
 
   function requestCloseOthers(tabId: string): void {
@@ -417,26 +455,19 @@
       if (others.length > 0) showToast('Pinned tabs were kept.');
       return;
     }
-    const live = closable.flatMap(tabWorkers).filter(isWorkerLive);
+    const live = liveTerminals(closable);
     confirmState = {
       title: 'Close other tabs',
       message:
         live.length > 0
-          ? `Close ${closable.length} other tabs and stop ${live.length} running pane worker${live.length === 1 ? '' : 's'}? Worktrees are kept.`
+          ? `Close ${closable.length} other tabs and stop ${live.length} running terminal${live.length === 1 ? '' : 's'}? Worktrees are kept.`
           : `Close ${closable.length} other tabs?`,
       confirmLabel: 'Close others',
       danger: live.length > 0,
       onConfirm: async () => {
-        let failed = 0;
-        for (const tab of closable) {
-          if (!(await stopWorkers(tabWorkers(tab)))) {
-            failed += 1;
-            continue;
-          }
-          closeTabNow(tab.id, false);
-        }
+        const failed = await closeTabsNow(closable);
         syncParentWithActiveTab();
-        if (failed > 0) onError(`${failed} tab${failed === 1 ? '' : 's'} had a running pane that was not stopped; kept open.`);
+        if (failed > 0) onError(`${failed} tab${failed === 1 ? '' : 's'} could not be closed; kept open.`);
         if (others.some((tab) => tab.pinned)) showToast('Pinned tabs were kept.');
       },
     };
@@ -457,27 +488,20 @@
       showToast('Pinned tabs keep this pane open.');
       return;
     }
-    const live = closable.flatMap(tabWorkers).filter(isWorkerLive);
+    const live = liveTerminals(closable);
     confirmState = {
       title: 'Close pane',
       message:
         live.length > 0
-          ? `Close this pane, its ${closable.length} tabs, and stop ${live.length} running pane worker${live.length === 1 ? '' : 's'}? Worktrees are kept.`
+          ? `Close this pane, its ${closable.length} tabs, and stop ${live.length} running terminal${live.length === 1 ? '' : 's'}? Worktrees are kept.`
           : `Close this pane and its ${closable.length} tabs?`,
       confirmLabel: 'Close pane',
       danger: live.length > 0,
       onConfirm: async () => {
-        let failed = 0;
-        for (const tab of closable) {
-          if (!(await stopWorkers(tabWorkers(tab)))) {
-            failed += 1;
-            continue;
-          }
-          closeTabNow(tab.id, false);
-        }
+        const failed = await closeTabsNow(closable);
         if (tabs.some((tab) => tab.pinned)) showToast('Pinned tabs were kept.');
         if (failed > 0) {
-          onError(`${failed} tab${failed === 1 ? '' : 's'} had a running pane that was not stopped; kept open.`);
+          onError(`${failed} tab${failed === 1 ? '' : 's'} could not be closed; kept open.`);
           syncParentWithActiveTab();
           return;
         }
@@ -491,166 +515,168 @@
     };
   }
 
-  function reopenClosedTab(): void {
+  /** Removes the given terminals from every tab except `keepTabId`. */
+  function detachFromOtherTabs(ids: string[], keepTabId: string | null): void {
+    for (const other of [...snapshot.tabs]) {
+      if (other.id === keepTabId) continue;
+      for (const id of ids) {
+        if (!findTabById(snapshot, other.id) || !tabHasTerminal(other, id)) continue;
+        if (!removePaneFromTab(other, id)) removeTab(snapshot, other.id);
+      }
+    }
+  }
+
+  /** Reopens the most recent closed tab by restarting the same terminal identities. */
+  async function reopenClosedTab(): Promise<void> {
     const entry = snapshot.closedTabs[0];
     if (!entry) {
       showToast('No recently closed tab to reopen.');
       return;
     }
-    snapshot.closedTabs = snapshot.closedTabs.slice(1);
-    const restoredWorkers = tabWorkerIds({
-      id: '',
-      workerId: entry.workerId,
-      panes: entry.panes,
-      focusedWorkerId: entry.focusedWorkerId,
-      title: null,
-      color: null,
-      pinned: false,
-    })
-      .map((id) => workerById.get(id))
-      .filter((worker): worker is Worker => worker !== undefined);
-    if (restoredWorkers.length === 0) {
+    const started = scope;
+    const dropEntry = (): void => {
+      snapshot.closedTabs = snapshot.closedTabs.filter((candidate) => candidate !== entry);
+    };
+    const ids = paneTerminalIds(entry.panes).filter((id) => terminalById.has(id));
+    if (ids.length === 0) {
+      dropEntry();
       persist();
-      showToast('Those workers no longer exist.');
+      showToast('Those terminals no longer exist.');
       return;
     }
-    for (const worker of restoredWorkers) undismissWorker(snapshot, worker.id);
-    let tab = findTabForWorker(snapshot, restoredWorkers[0].id);
-    let group = groupById(snapshot, entry.groupId) ?? groupById(snapshot, snapshot.activeGroupId);
-    if (!group) group = snapshot.groups[0] ?? null;
-    if (!group) {
-      persist();
-      return;
-    }
-    if (!tab) {
-      const tabId = addWorkerTab(
-        snapshot,
-        restoredWorkers[0].id,
-        group.id,
-        Math.max(0, entry.index),
-      );
-      tab = tabId ? findTabById(snapshot, tabId) : null;
-    }
-    if (!tab) {
-      persist();
-      return;
-    }
-    tab.panes = clonePane(entry.panes);
-    for (const workerId of tabWorkerIds(tab)) {
-      if (!workerById.has(workerId)) removePaneFromTab(tab, workerId);
-    }
-    const remaining = tabWorkerIds(tab).filter((workerId) => workerById.has(workerId));
-    if (remaining.length === 0) {
-      removeTab(snapshot, tab.id);
-      persist();
-      return;
-    }
-    tab.workerId = remaining[0];
-    tab.focusedWorkerId = remaining.includes(entry.focusedWorkerId)
-      ? entry.focusedWorkerId
-      : remaining[0];
-    tab.title = entry.title;
-    tab.color = entry.color;
-    tab.pinned = entry.pinned;
-    for (const worker of restoredWorkers) {
-      if (!isWorkerLive(worker)) onAction('restart', worker);
-    }
-    activateTabInternal(tab.id, true, tab.focusedWorkerId);
-  }
-
-  async function createTerminal(): Promise<void> {
-    if (!project) return;
+    beginLayoutWork();
     try {
-      const worker = await onCreate();
-      await tick();
-      if (!worker) return;
-      let tab = findTabForWorker(snapshot, worker.id);
-      if (!tab) {
-        const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
-        if (group) {
-          const tabId = addWorkerTab(snapshot, worker.id, group.id);
-          tab = tabId ? findTabById(snapshot, tabId) : null;
+      for (const id of ids) {
+        try {
+          await onRestartTerminal(id);
+        } catch (error) {
+          // The entry stays so the user can try again; restarted panes keep running.
+          onError(`${terminalById.get(id)?.name ?? 'Terminal'}: ${errorMessage(error)}`);
+          return;
         }
       }
-      if (tab) activateTabInternal(tab.id, true);
+      await tick();
+      if (scope !== started) return;
+      dropEntry();
+      const present = ids.filter((id) => terminalById.has(id));
+      let group = groupById(snapshot, entry.groupId) ?? groupById(snapshot, snapshot.activeGroupId);
+      if (!group) group = snapshot.groups[0] ?? null;
+      if (!group || present.length === 0) {
+        persist();
+        return;
+      }
+      let tab = findTabForTerminal(snapshot, present[0]);
+      if (!tab) {
+        const tabId = addTerminalTab(snapshot, present[0], group.id, Math.max(0, entry.index));
+        tab = tabId ? findTabById(snapshot, tabId) : null;
+      }
+      if (!tab) {
+        persist();
+        return;
+      }
+      detachFromOtherTabs(present, tab.id);
+      tab.panes = clonePane(entry.panes);
+      for (const terminalId of tabTerminalIds(tab)) {
+        if (!terminalById.has(terminalId)) removePaneFromTab(tab, terminalId);
+      }
+      const remaining = tabTerminalIds(tab);
+      tab.terminalId = remaining[0];
+      tab.focusedTerminalId = remaining.includes(entry.focusedTerminalId)
+        ? entry.focusedTerminalId
+        : remaining[0];
+      tab.title = entry.title;
+      tab.color = entry.color;
+      tab.pinned = entry.pinned;
+      activateTabInternal(tab.id, true, tab.focusedTerminalId);
+    } finally {
+      endLayoutWork();
+    }
+  }
+
+  /** Adds a new terminal tab in the selected worktree. Never creates a worktree. */
+  export async function createTerminal(kind: TerminalKind = 'shell'): Promise<void> {
+    const started = scope;
+    if (started === null) return;
+    beginLayoutWork();
+    try {
+      const created = await onCreateTerminal(kind, null);
+      await tick();
+      if (scope !== started) return;
+      const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
+      if (!group) return;
+      const tabId = addTerminalTab(snapshot, created.id, group.id);
+      if (tabId) activateTabInternal(tabId, true);
       else persist();
     } catch (error) {
       onError(`Could not create a terminal: ${errorMessage(error)}`);
+    } finally {
+      endLayoutWork();
     }
   }
 
   let splitInFlight = false;
   let lastSplitAt = 0;
 
-  function removeDuplicateTabsForWorker(workerId: string, keepTabId: string | null): void {
-    for (const tab of [...snapshot.tabs]) {
-      if (tab.id === keepTabId) continue;
-      if (!tabHasWorker(tab, workerId)) continue;
-      for (const id of tabWorkerIds(tab)) dismissWorker(snapshot, id);
-      removeTab(snapshot, tab.id);
-    }
-  }
-
   async function createSplit(groupId: string, direction: 'right' | 'down'): Promise<void> {
     if (splitInFlight || Date.now() - lastSplitAt < 400) return;
     splitInFlight = true;
     lastSplitAt = Date.now();
-    let worker: Worker | null = null;
+    const started = scope;
+    beginLayoutWork();
     try {
       const group = groupById(snapshot, groupId) ?? groupById(snapshot, snapshot.activeGroupId);
       if (!group) return;
-      // Resolve the target tab before the async roster update can move the active tab.
-      const target = activeTabForGroup(groupId) ?? activeTab;
-      const targetId = target?.id ?? null;
-      if (target) {
-        snapshot.activeGroupId = group.id;
-        group.activeTabId = target.id;
-        target.focusedWorkerId = tabFocusWorker(target);
-        onActivate(target.focusedWorkerId);
-        persist();
+      // Resolve the source before the async roster update can move the active tab.
+      const target = activeTabForGroup(group.id) ?? activeTab;
+      if (!target) {
+        // An empty pane has no source terminal, so a split is a plain new terminal here.
+        const created = await onCreateTerminal('shell', null);
+        await tick();
+        if (scope !== started) return;
+        const tabId = addTerminalTab(snapshot, created.id, group.id);
+        if (tabId) activateTabInternal(tabId, true);
+        return;
       }
-      worker = await onCreate();
-      if (!worker) return;
+      const targetId = target.id;
+      const sourceId = tabFocusTerminal(target);
+      snapshot.activeGroupId = group.id;
+      group.activeTabId = targetId;
+      target.focusedTerminalId = sourceId;
+      onActivateTerminal(sourceId);
+      persist();
+      // A split copies the source's kind and, natively, its live cwd.
+      const created = await onCreateTerminal(terminalById.get(sourceId)?.kind ?? 'shell', sourceId);
       await tick();
+      if (scope !== started) return;
 
-      const createdId = worker.id;
-      const targetTab = targetId ? findTabById(snapshot, targetId) : null;
-      // A new worker must never gain a competing tab; drop any tab reconciliation
-      // created for it before merging it into the target pane tree.
-      removeDuplicateTabsForWorker(createdId, targetTab?.id ?? null);
-      removeDuplicateTabsForWorker(
-        targetTab ? tabFocusWorker(targetTab) : '',
-        targetTab?.id ?? null,
-      );
-      if (targetTab) undismissWorker(snapshot, tabFocusWorker(targetTab));
-
+      const targetTab = findTabById(snapshot, targetId);
+      // The new terminal must never keep a competing tab of its own.
+      detachFromOtherTabs([created.id], targetTab?.id ?? null);
       if (targetTab) {
-        if (!tabHasWorker(targetTab, createdId)) {
-          const focus = tabFocusWorker(targetTab);
-          targetTab.panes = splitPane(targetTab.panes, focus, createdId, direction);
+        if (!tabHasTerminal(targetTab, created.id)) {
+          const at = tabHasTerminal(targetTab, sourceId) ? sourceId : tabFocusTerminal(targetTab);
+          targetTab.panes = splitPane(targetTab.panes, at, created.id, direction);
         }
         if (snapshot.maximizedPane?.tabId === targetTab.id) snapshot.maximizedPane = null;
-        targetTab.focusedWorkerId = createdId;
+        targetTab.focusedTerminalId = created.id;
         snapshot.activeGroupId =
           groupContainingTab(snapshot, targetTab.id)?.id ?? snapshot.activeGroupId;
-      } else {
-        const tabId = addWorkerTab(snapshot, createdId, group.id);
-        if (!tabId) return;
+      } else if (!addTerminalTab(snapshot, created.id, group.id)) {
+        return;
       }
-      undismissWorker(snapshot, createdId);
       persist();
-      const finalTab = targetId ? findTabById(snapshot, targetId) : findTabForWorker(snapshot, createdId);
+      const finalTab = findTabById(snapshot, targetId) ?? findTabForTerminal(snapshot, created.id);
       if (finalTab) {
-        const g = groupContainingTab(snapshot, finalTab.id);
-        if (g) g.activeTabId = finalTab.id;
-        activateTabInternal(finalTab.id, true, createdId);
+        const owner = groupContainingTab(snapshot, finalTab.id);
+        if (owner) owner.activeTabId = finalTab.id;
+        activateTabInternal(finalTab.id, true, created.id);
       }
       void tick().then(() => activeHandle()?.focus());
     } catch (error) {
-      if (worker) undismissWorker(snapshot, worker.id);
       onError(`Could not split the terminal: ${errorMessage(error)}`);
     } finally {
       splitInFlight = false;
+      endLayoutWork();
     }
   }
 
@@ -667,8 +693,8 @@
     persist();
     const tab = activeTabForGroup(groupId);
     if (tab) {
-      const focus = tabFocusWorker(tab);
-      onActivate(focus);
+      const focus = tabFocusTerminal(tab);
+      onActivateTerminal(focus);
       terminalHandles.get(focus)?.focus();
     }
   }
@@ -826,7 +852,8 @@
   function openNewTabMenu(anchor: DOMRect): void {
     const groupId = snapshot.activeGroupId;
     openMenuAt(anchor.left, anchor.bottom + 6, [
-      menuItem('New Terminal', SquareTerminal, 'Ctrl+T', () => void createTerminal()),
+      menuItem('New Terminal', SquareTerminal, 'Ctrl+T', () => void createTerminal('shell')),
+      menuItem('New Agent Terminal', SquareTerminal, undefined, () => void createTerminal('agent')),
       menuItem('Split Terminal Right', SquareSplitVertical, 'Ctrl+Shift+D', () =>
         void createSplit(groupId, 'right'),
       ),
@@ -855,7 +882,7 @@
   function openPaneActionsMenu(anchor: DOMRect, groupId: string): void {
     snapshot.activeGroupId = groupId;
     const current = activeTabForGroup(groupId);
-    if (current) onActivate(tabFocusWorker(current));
+    if (current) onActivateTerminal(tabFocusTerminal(current));
     const maximized = isMaximizeTargetActive(groupId);
     openMenuAt(anchor.right - 232, anchor.bottom + 6, [
       menuItem('Split Terminal Right', SquareSplitVertical, 'Ctrl+Shift+D', () =>
@@ -880,8 +907,8 @@
         PanelRightClose,
         undefined,
         () => {
-          if (current && tabWorkerIds(current).length > 1) {
-            closePane(current.id, tabFocusWorker(current));
+          if (current && tabTerminalIds(current).length > 1) {
+            closePane(current.id, tabFocusTerminal(current));
           } else {
             requestCloseGroup(groupId);
           }
@@ -890,18 +917,60 @@
           danger: true,
           disabled:
             snapshot.groups.length <= 1 &&
-            (!current || tabWorkerIds(current).length <= 1),
+            (!current || tabTerminalIds(current).length <= 1),
         },
       ),
     ]);
   }
 
-  function workerMenuEntries(worker: Worker): MenuEntry[] {
+  async function runTerminalAction(
+    action: () => Promise<TerminalSession>,
+    success: string,
+  ): Promise<void> {
+    try {
+      await action();
+      showToast(success);
+    } catch (error) {
+      onError(errorMessage(error));
+    }
+  }
+
+  /** Process actions for one terminal; they never touch the worktree. */
+  function terminalMenuEntries(terminalId: string): MenuEntry[] {
+    const terminal = terminalById.get(terminalId);
+    if (!terminal) return [];
+    return [
+      menuItem('Restart Terminal', RefreshCw, undefined, () => {
+        void runTerminalAction(() => onRestartTerminal(terminalId), `${terminal.name} restarted.`);
+      }),
+      menuItem(
+        'Stop Terminal',
+        Square,
+        undefined,
+        () => {
+          confirmState = {
+            title: 'Stop terminal',
+            message: `Stop ${terminal.name}? Its process ends; the tab, worktree and session history stay.`,
+            confirmLabel: 'Stop terminal',
+            danger: true,
+            onConfirm: async () => {
+              await onStopTerminal(terminalId);
+              showToast(`${terminal.name} stopped.`);
+            },
+          };
+        },
+        { disabled: !isTerminalLive(terminal) },
+      ),
+    ];
+  }
+
+  function workerMenuEntries(): MenuEntry[] {
+    const target = worker;
     return [
       separator(),
-      menuItem('Open in Editor', ExternalLink, undefined, () => onAction('editor', worker)),
-      menuItem('View Changes', GitCompare, undefined, () => onAction('diff', worker)),
-      menuItem('Restart Worker', RefreshCw, undefined, () => onAction('restart', worker)),
+      menuItem('Open in Editor', ExternalLink, undefined, () => onAction('editor', target)),
+      menuItem('View Changes', GitCompare, undefined, () => onAction('diff', target)),
+      menuItem('Restart Worker', RefreshCw, undefined, () => onAction('restart', target)),
       menuItem(
         'Stop Worker',
         Square,
@@ -909,27 +978,27 @@
         () => {
           confirmState = {
             title: 'Stop worker',
-            message: `Stop ${worker.name}? The shell process ends; the worktree and session history stay.`,
+            message: `Stop every terminal in ${target.name}? Their processes end; the worktree and session history stay.`,
             confirmLabel: 'Stop worker',
             danger: true,
             onConfirm: async () => {
-              if (!onStop) {
+              if (!onStopWorker) {
                 onError('Stopping a worker is not available in this shell.');
                 return;
               }
-              await onStop(worker);
-              showToast(`${worker.name} stopped.`);
+              await onStopWorker(target);
+              showToast(`${target.name} stopped.`);
             },
           };
         },
-        { disabled: !isWorkerLive(worker) },
+        { disabled: !isWorkerLive(target) },
       ),
-      menuItem('Merge Worktree...', GitMerge, undefined, () => onAction('merge', worker)),
+      menuItem('Merge Worktree...', GitMerge, undefined, () => onAction('merge', target)),
       menuItem(
         'Delete Workspace...',
         Trash2,
         undefined,
-        () => onAction('delete', worker),
+        () => onAction('delete', target),
         { danger: true },
       ),
     ];
@@ -939,7 +1008,6 @@
     event.preventDefault();
     event.stopPropagation();
     activateTabInternal(tab.id, true);
-    const worker = workerForTab(tab);
     const group = groupContainingTab(snapshot, tab.id);
     const groupId = group?.id ?? snapshot.activeGroupId;
     const items: MenuEntry[] = [
@@ -968,16 +1036,16 @@
         PanelRightClose,
         undefined,
         () => {
-          if (tabWorkerIds(tab).length > 1) closePane(tab.id, tabFocusWorker(tab));
+          if (tabTerminalIds(tab).length > 1) closePane(tab.id, tabFocusTerminal(tab));
           else requestCloseGroup(groupId);
         },
         {
           danger: true,
-          disabled: tabWorkerIds(tab).length <= 1 && snapshot.groups.length <= 1,
+          disabled: tabTerminalIds(tab).length <= 1 && snapshot.groups.length <= 1,
         },
       ),
     ];
-    if (worker) items.push(...workerMenuEntries(worker));
+    items.push(separator(), ...terminalMenuEntries(tabFocusTerminal(tab)), ...workerMenuEntries());
     openMenuAt(event.clientX, event.clientY, items);
   }
 
@@ -986,8 +1054,8 @@
     event.stopPropagation();
     snapshot.activeGroupId = groupId;
     const tab = activeTabForGroup(groupId);
-    const focus = tab ? tabFocusWorker(tab) : null;
-    if (focus) onActivate(focus);
+    const focus = tab ? tabFocusTerminal(tab) : null;
+    if (focus) onActivateTerminal(focus);
     const handle = focus ? terminalHandles.get(focus) : undefined;
     const maximized = isMaximizeTargetActive(groupId);
     openMenuAt(event.clientX, event.clientY, [
@@ -1031,6 +1099,7 @@
       }),
       menuItem('Clear Screen', Eraser, 'Ctrl+K', () => handle?.clear()),
       menuItem('Reset Terminal', RotateCcw, undefined, () => handle?.reset()),
+      ...(focus ? [separator(), ...terminalMenuEntries(focus)] : []),
       separator(),
       menuItem('Close Pane', PanelRightClose, undefined, () => requestCloseGroup(groupId), {
         danger: true,
@@ -1039,7 +1108,7 @@
     ], 240);
   }
 
-  function openPaneMenu(event: MouseEvent, tabId: string, workerId: string): void {
+  function openPaneMenu(event: MouseEvent, tabId: string, terminalId: string): void {
     event.preventDefault();
     event.stopPropagation();
     const tab = findTabById(snapshot, tabId);
@@ -1047,11 +1116,11 @@
     const group = groupContainingTab(snapshot, tabId);
     if (!group) return;
     snapshot.activeGroupId = group.id;
-    tab.focusedWorkerId = workerId;
+    tab.focusedTerminalId = terminalId;
     clampMaximizedPane();
-    onActivate(workerId);
-    const handle = terminalHandles.get(workerId);
-    const paneCount = tabWorkerIds(tab).length;
+    onActivateTerminal(terminalId);
+    const handle = terminalHandles.get(terminalId);
+    const paneCount = tabTerminalIds(tab).length;
     const maximized = isMaximizeTargetActive(group.id);
     openMenuAt(event.clientX, event.clientY, [
       menuItem(
@@ -1093,8 +1162,10 @@
       menuItem('Clear Screen', Eraser, 'Ctrl+K', () => handle?.clear()),
       menuItem('Reset Terminal', RotateCcw, undefined, () => handle?.reset()),
       separator(),
+      ...terminalMenuEntries(terminalId),
+      separator(),
       paneCount > 1
-        ? menuItem('Close Pane', PanelRightClose, undefined, () => closePane(tab.id, workerId), {
+        ? menuItem('Close Pane', PanelRightClose, undefined, () => closePane(tab.id, terminalId), {
             danger: true,
           })
         : menuItem('Close Tab', X, 'Ctrl+W', () => requestCloseTab(tab.id), { danger: true }),
@@ -1104,26 +1175,26 @@
   function toggleMaximize(groupId: string): void {
     snapshot.activeGroupId = groupId;
     const tab = activeTabForGroup(groupId);
-    const focus = tab ? tabFocusWorker(tab) : null;
-    if (tab && focus !== null) tab.focusedWorkerId = focus;
+    const focus = tab ? tabFocusTerminal(tab) : null;
+    if (tab && focus !== null) tab.focusedTerminalId = focus;
     if (snapshot.maximizedGroupId === groupId) {
       // Collapse the group expansion before a split tab can expand one pane.
       snapshot.maximizedGroupId = null;
       snapshot.maximizedPane = null;
-    } else if (tab && focus !== null && tabWorkerIds(tab).length > 1) {
+    } else if (tab && focus !== null && tabTerminalIds(tab).length > 1) {
       // A split tab expands its focused terminal; this replaces any group expansion.
       const current = snapshot.maximizedPane;
       const expanded =
-        current !== null && current.tabId === tab.id && current.workerId === focus;
+        current !== null && current.tabId === tab.id && current.terminalId === focus;
       snapshot.maximizedGroupId = null;
-      snapshot.maximizedPane = expanded ? null : { tabId: tab.id, workerId: focus };
+      snapshot.maximizedPane = expanded ? null : { tabId: tab.id, terminalId: focus };
     } else {
       // A single-pane group expands the whole group.
       snapshot.maximizedPane = null;
       snapshot.maximizedGroupId = groupId;
     }
     persist();
-    if (focus !== null) onActivate(focus);
+    if (focus !== null) onActivateTerminal(focus);
     void tick().then(() => {
       const handle = focus !== null ? terminalHandles.get(focus) : undefined;
       handle?.focus();
@@ -1148,41 +1219,47 @@
     persist();
   }
 
-  function closePaneNow(tabId: string, workerId: string): void {
-    const tab = findTabById(snapshot, tabId);
-    if (!tab) return;
-    const wasFocused = tabFocusWorker(tab) === workerId;
-    if (!removePaneFromTab(tab, workerId)) {
-      closeTabNow(tabId);
-      return;
+  async function closePaneNow(tabId: string, terminalId: string): Promise<void> {
+    const started = scope;
+    beginLayoutWork();
+    try {
+      // Only this pane's terminal stops; its siblings and the worktree keep running.
+      if (!(await closeTerminalsNative([terminalId]))) return;
+      if (scope !== started) return;
+      const tab = findTabById(snapshot, tabId);
+      if (!tab) return;
+      const wasFocused = tabFocusTerminal(tab) === terminalId;
+      if (!removePaneFromTab(tab, terminalId)) {
+        finishCloseTab(tabId, true);
+        return;
+      }
+      clampMaximizedPane();
+      persist();
+      if (wasFocused) activateTabInternal(tab.id, true, tabFocusTerminal(tab));
+      else syncParentWithActiveTab();
+    } finally {
+      endLayoutWork();
     }
-    dismissWorker(snapshot, workerId);
-    clampMaximizedPane();
-    persist();
-    if (wasFocused) activateTabInternal(tab.id, true, tabFocusWorker(tab));
-    else syncParentWithActiveTab();
   }
 
-  function closePane(tabId: string, workerId: string): void {
+  function closePane(tabId: string, terminalId: string): void {
     const tab = findTabById(snapshot, tabId);
     if (!tab) return;
-    if (tabWorkerIds(tab).length <= 1) {
+    if (tabTerminalIds(tab).length <= 1) {
       requestCloseTab(tabId);
       return;
     }
-    const worker = workerById.get(workerId);
-    if (!worker || !isWorkerLive(worker)) {
-      closePaneNow(tabId, workerId);
+    const terminal = terminalById.get(terminalId);
+    if (!terminal || !isTerminalLive(terminal)) {
+      void closePaneNow(tabId, terminalId);
       return;
     }
     confirmState = {
       title: 'Stop pane and close',
-      message: `Closing this pane stops ${worker.name}. Other panes and the worktree stay open.`,
+      message: `Closing this pane stops ${terminal.name}. Other panes and the worktree stay open.`,
       confirmLabel: 'Stop and close',
       danger: true,
-      onConfirm: async () => {
-        if (await stopWorkers([worker])) closePaneNow(tabId, workerId);
-      },
+      onConfirm: () => closePaneNow(tabId, terminalId),
     };
   }
 
@@ -1191,46 +1268,47 @@
     snapshot.activeGroupId = groupId;
     persist();
     const tab = activeTabForGroup(groupId);
-    if (tab) onActivate(tabFocusWorker(tab));
+    if (tab) onActivateTerminal(tabFocusTerminal(tab));
   }
 
-  function focusPane(workerId: string): void {
-    const tab = findTabForWorker(snapshot, workerId);
+  function focusPane(terminalId: string): void {
+    const tab = findTabForTerminal(snapshot, terminalId);
     if (!tab) return;
     const group = groupContainingTab(snapshot, tab.id);
     if (!group) return;
     if (group.id !== snapshot.activeGroupId || group.activeTabId !== tab.id) return;
-    if (tab.focusedWorkerId === workerId) return;
-    tab.focusedWorkerId = workerId;
+    if (tab.focusedTerminalId === terminalId) return;
+    tab.focusedTerminalId = terminalId;
     clampMaximizedPane();
     persist();
   }
 
-  function activateWorker(workerId: string): void {
-    let tab = findTabForWorker(snapshot, workerId);
+  /** Brings a terminal's tab and pane forward, adding a tab if a live terminal has none. */
+  export function activateTerminal(terminalId: string): void {
+    const terminal = terminalById.get(terminalId);
+    if (!terminal) return;
+    let tab = findTabForTerminal(snapshot, terminalId);
     if (!tab) {
-      undismissWorker(snapshot, workerId);
+      if (terminal.closed) return;
       const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
       if (!group) return;
-      const tabId = addWorkerTab(snapshot, workerId, group.id);
+      const tabId = addTerminalTab(snapshot, terminalId, group.id);
       if (!tabId) return;
       tab = findTabById(snapshot, tabId);
       persist();
-      const worker = workerById.get(workerId);
-      if (worker && !isWorkerLive(worker)) onAction('restart', worker);
     }
     if (tab) {
       const group = groupContainingTab(snapshot, tab.id);
       if (
         group?.id === snapshot.activeGroupId &&
         group.activeTabId === tab.id &&
-        tabFocusWorker(tab) === workerId
+        tabFocusTerminal(tab) === terminalId
       ) {
-        // Already the active pane. Do not call onActivate: terminal autofocus
+        // Already the active pane. Do not notify the parent: terminal autofocus
         // during mount must not overwrite the restored selection.
         return;
       }
-      activateTabInternal(tab.id, true, workerId);
+      activateTabInternal(tab.id, true, terminalId);
     }
   }
 
@@ -1392,7 +1470,7 @@
       if (ordered.includes(id)) return;
       if (!tabById.has(id)) return;
       const tab = tabById.get(id);
-      if (!tab || !tabWorkerIds(tab).some((workerId) => workerById.has(workerId))) return;
+      if (!tab || !tabTerminalIds(tab).some((terminalId) => terminalById.has(terminalId))) return;
       ordered.push(id);
     };
     for (const id of snapshot.recentTabIds) push(id);
@@ -1577,19 +1655,19 @@
 
     if (mod && !shift && key.toLowerCase() === 't') {
       event.preventDefault();
-      void createTerminal();
+      void createTerminal('shell');
       return true;
     }
     if (mod && shift && key.toLowerCase() === 't') {
       event.preventDefault();
-      reopenClosedTab();
+      void reopenClosedTab();
       return true;
     }
     if (mod && !shift && key.toLowerCase() === 'w') {
       const tab = activeTab;
       if (tab) {
         event.preventDefault();
-        if (tabWorkerIds(tab).length > 1) closePane(tab.id,tabFocusWorker(tab));
+        if (tabTerminalIds(tab).length > 1) closePane(tab.id,tabFocusTerminal(tab));
         else requestCloseTab(tab.id);
         return true;
       }
@@ -1760,14 +1838,14 @@
       return;
     }
     const tab = activeTab;
-    if (tab) terminalHandles.get(tabFocusWorker(tab))?.focus();
+    if (tab) terminalHandles.get(tabFocusTerminal(tab))?.focus();
   }
 
   const api: WorkspaceApi = {
     activateTab(tabId) {
       activateTabInternal(tabId, true);
     },
-    activateWorker,
+    activateTerminal,
     focusPane,
     closeTab(tabId) {
       requestCloseTab(tabId);
@@ -1788,13 +1866,15 @@
     cancelRename,
     moveTabToGroup,
     moveTabToNewGroup,
-    splitWithNewWorker(groupId, direction) {
+    splitWithNewTerminal(groupId, direction) {
       void createSplit(groupId, direction);
     },
     createTerminal() {
-      void createTerminal();
+      void createTerminal('shell');
     },
-    reopenClosedTab,
+    reopenClosedTab() {
+      void reopenClosedTab();
+    },
     focusGroup,
     setRatio,
     setPaneRatio,
@@ -1811,22 +1891,21 @@
     copyText(text, label) {
       void copyText(text, label);
     },
-    registerTerminal(workerId, handle, identity) {
+    registerTerminal(terminalId, handle, identity) {
       if (handle) {
-        terminalHandles.set(workerId, handle);
+        terminalHandles.set(terminalId, handle);
         return;
       }
-      if (!identity || terminalHandles.get(workerId) === identity) {
-        terminalHandles.delete(workerId);
+      if (!identity || terminalHandles.get(terminalId) === identity) {
+        terminalHandles.delete(terminalId);
       }
     },
-    handleFor(workerId) {
-      return terminalHandles.get(workerId);
+    handleFor(terminalId) {
+      return terminalHandles.get(terminalId);
     },
     isClickSuppressed,
     showToast,
   };
-
   setContext(WS_VIEW, view);
   setContext(WS_API, api);
 
@@ -1836,67 +1915,33 @@
   });
 
   $effect(() => {
-    const id = project.id;
-    if (id === projectId) return;
+    const projectId = project.id;
+    const terminalId = worker.id;
+    if (scope?.projectId === projectId && scope.terminalId === terminalId) return;
     untrack(() => {
-      projectSettling = true;
-      projectId = id;
-      snapshot = loadSnapshot(id, workers, activeWorkerId);
+      scope = { projectId, terminalId };
+      snapshot = loadSnapshot(projectId, terminalId, terminals, null);
       ui = { drag: null, editingTabId: null, toast: null };
       menu = null;
+      subMenu = null;
       recent = null;
       confirmState = null;
       terminalHandles.clear();
-      const preferred = activeWorkerId ? findTabForWorker(snapshot, activeWorkerId) : null;
-      if (preferred) {
-        activateTabInternal(preferred.id, false, activeWorkerId ?? undefined);
-      }
-      // Never call onActivate while mounting. The shell owns the restored
-      // selection; a default-tab notification here overwrites it.
-      void tick().then(() => {
-        projectSettling = false;
-      });
-    });
-  });
-
-  $effect(() => {
-    const list = workers;
-    if (projectId !== project.id) return;
-    untrack(() => {
-      reconcileWorkers(snapshot, list);
+      // loadSnapshot reconciled against the live roster after it saved; store the result.
       persist();
+      // Never notify the parent while mounting: it owns the restored selection.
     });
   });
 
   $effect(() => {
-    const id = activeWorkerId;
-    if (projectId !== project.id || !id) return;
-    if (!workers.some((worker) => worker.id === id)) return;
+    const list = terminals;
+    if (scope === null || scope.terminalId !== worker.id || layoutBusy > 0) return;
     untrack(() => {
-      const tab = findTabForWorker(snapshot, id);
-      if (!tab) {
-        if (!projectSettling) activateWorker(id);
-        return;
-      }
-      const group = groupContainingTab(snapshot, tab.id);
-      if (!group) return;
-      if (
-        snapshot.activeGroupId === group.id &&
-        group.activeTabId === tab.id &&
-        tabFocusWorker(tab) === id
-      ) {
-        return;
-      }
-      if (snapshot.activeGroupId === group.id && group.activeTabId === tab.id) {
-        tab.focusedWorkerId = id;
-        clampMaximizedPane();
-        persist();
-        terminalHandles.get(id)?.focus();
-        return;
-      }
-      activateTabInternal(tab.id, false, id);
+      void list;
+      reconcile();
     });
   });
+
 
   onMount(() => {
     window.addEventListener('keyup', onWindowKeyup);
@@ -2124,8 +2169,8 @@
       <div class="max-h-[min(18rem,60vh)] overflow-hidden py-0.5">
         {#each recent.ids as id, index (id)}
           {@const tab = tabById.get(id)}
-          {@const worker = tab ? workerById.get(tabFocusWorker(tab)) : null}
-          {#if tab && worker}
+          {@const switchTarget = tab ? terminalById.get(tabFocusTerminal(tab)) : null}
+          {#if tab && switchTarget}
             <button
               type="button"
               role="option"

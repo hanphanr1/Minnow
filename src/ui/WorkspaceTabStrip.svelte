@@ -14,7 +14,7 @@
   import {
     WS_API,
     WS_VIEW,
-    tabFocusWorker,
+    tabFocusTerminal,
     type WorkspaceApi,
     type WorkspaceTab,
     type WorkspaceView,
@@ -67,14 +67,14 @@
   }
 
   function labelFor(tab: WorkspaceTab): string {
-    const worker = view.workerById.get(tab.workerId);
-    return tab.title?.trim() || worker?.name || 'Terminal';
+    const terminal = view.terminalById.get(tab.terminalId);
+    return tab.title?.trim() || terminal?.name || 'Terminal';
   }
 
   function statusClass(tab: WorkspaceTab): string {
-    const worker = view.workerById.get(tabFocusWorker(tab));
-    if (worker?.status === 'waiting-for-input') return 'text-amber-500';
-    if (worker?.status === 'exited') return 'text-muted-foreground/50';
+    const terminal = view.terminalById.get(tabFocusTerminal(tab));
+    if (terminal?.status === 'waiting-for-input') return 'text-amber-500';
+    if (terminal?.status === 'exited') return 'text-muted-foreground/50';
     return 'text-muted-foreground';
   }
 
@@ -242,7 +242,7 @@
               style="background-color: {tab.color}"
             ></span>
           {/if}
-          {#if (view.maximizedGroupId === groupId || (view.maximizedPane?.tabId === tab.id && view.maximizedPane.workerId === tabFocusWorker(tab))) && active && view.ui.editingTabId !== tab.id}
+          {#if (view.maximizedGroupId === groupId || (view.maximizedPane?.tabId === tab.id && view.maximizedPane.terminalId === tabFocusTerminal(tab))) && active && view.ui.editingTabId !== tab.id}
             <button
               type="button"
               class="mr-1 flex size-4 shrink-0 items-center justify-center rounded-sm bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground"

@@ -16,9 +16,9 @@
     WS_API,
     WS_VIEW,
     clampRatio,
-    tabFocusWorker,
-    tabHasWorker,
-    tabWorkerIds,
+    tabFocusTerminal,
+    tabHasTerminal,
+    tabTerminalIds,
     type LayoutNode,
     type PaneNode,
     type SplitDirection,
@@ -68,9 +68,9 @@
   function maximizedPaneRoot(tab: WorkspaceTab, tabActive: boolean): PaneNode {
     const value = view.maximizedPane;
     if (!tabActive || value === null || value.tabId !== tab.id) return tab.panes;
-    if (value.workerId !== tab.focusedWorkerId) return tab.panes;
-    if (tabWorkerIds(tab).length < 2 || !tabHasWorker(tab, value.workerId)) return tab.panes;
-    return { type: 'leaf', workerId: value.workerId };
+    if (value.terminalId !== tab.focusedTerminalId) return tab.panes;
+    if (tabTerminalIds(tab).length < 2 || !tabHasTerminal(tab, value.terminalId)) return tab.panes;
+    return { type: 'leaf', terminalId: value.terminalId };
   }
 
   function beginResize(
@@ -212,40 +212,41 @@
   groupId: string,
 )}
   {#if node.type === 'leaf'}
-    {@const worker = view.workerById.get(node.workerId)}
-    {#if worker}
+    {@const terminal = view.terminalById.get(node.terminalId)}
+    {#if terminal}
       {@const paneFocused =
         tabActive &&
         view.activeGroupId === groupId &&
-        tabFocusWorker(tab) === node.workerId}
+        tabFocusTerminal(tab) === node.terminalId}
       {@const maximizedPane = view.maximizedPane}
       {@const paneExpanded =
         view.maximizedGroupId === groupId
           ? true
-          : tabWorkerIds(tab).length > 1 &&
+          : tabTerminalIds(tab).length > 1 &&
             maximizedPane !== null &&
             maximizedPane.tabId === tab.id &&
-            maximizedPane.workerId === node.workerId}
+            maximizedPane.terminalId === node.terminalId}
       <div
         class="relative flex min-h-0 min-w-0 flex-1 overflow-hidden {view.preferences.paneTitles
           ? 'pt-[24px]'
           : ''}"
-        data-pane-worker={node.workerId}
+        data-pane-terminal={node.terminalId}
         data-active-pane={paneFocused ? '' : undefined}
         role="application"
         aria-label="Terminal pane"
-        onpointerdown={() => api.activateWorker(node.workerId)}
-        onfocusin={() => api.focusPane(node.workerId)}
-        oncontextmenu={(event) => api.openPaneMenu(event, tab.id, node.workerId)}
+        onpointerdown={() => api.activateTerminal(node.terminalId)}
+        onfocusin={() => api.focusPane(node.terminalId)}
+        oncontextmenu={(event) => api.openPaneMenu(event, tab.id, node.terminalId)}
       >
-        {#key worker.id}
+        {#key terminal.id}
         <Terminal
-          {worker}
+          {terminal}
           active={paneFocused && view.allowTerminalFocus}
           preferences={view.preferences}
-          onActivate={(workerId) => api.focusPane(workerId)}
+          onActivate={(terminalId) => api.focusPane(terminalId)}
           onError={(message) => view.onError(message)}
-          onReady={(handle, identity, workerId) => api.registerTerminal(workerId, handle, identity)}
+          onReady={(handle, identity, terminalId) =>
+            api.registerTerminal(terminalId, handle, identity)}
         />
         {/key}
         <div
@@ -262,7 +263,7 @@
               title="Rename tab"
               onclick={() => api.beginRename(tab.id)}
             >
-              {tabLabel(tab, worker.name)}
+              {tabLabel(tab, terminal.name)}
             </button>
           {/if}
           <div class="pane-title-actions">
@@ -273,7 +274,7 @@
               title="Split terminal right (Ctrl+Shift+D)"
               onclick={(event) => {
                 event.stopPropagation();
-                api.splitWithNewWorker(groupId, 'right');
+                api.splitWithNewTerminal(groupId, 'right');
               }}
             >
               <SquareSplitVertical size={12} />
@@ -285,7 +286,7 @@
               title="Split terminal down (Alt+Shift+D)"
               onclick={(event) => {
                 event.stopPropagation();
-                api.splitWithNewWorker(groupId, 'down');
+                api.splitWithNewTerminal(groupId, 'down');
               }}
             >
               <SquareSplitHorizontal size={12} />
@@ -306,7 +307,7 @@
                 <Maximize2 size={12} />
               {/if}
             </button>
-            {#if tabWorkerIds(tab).length > 1}
+            {#if tabTerminalIds(tab).length > 1}
               <button
                 type="button"
                 class="pane-title-close"
@@ -314,7 +315,7 @@
                 title="Close pane"
                 onclick={(event) => {
                   event.stopPropagation();
-                  api.closePane(tab.id, node.workerId);
+                  api.closePane(tab.id, node.terminalId);
                 }}
               >
                 <X size={12} />
