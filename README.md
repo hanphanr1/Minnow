@@ -2,7 +2,7 @@
 
 A Windows workspace for parallel [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.
 
-Each worker gets its own Git worktree and native terminal. Monitor workers in a grid, switch to focused tabs, review changes, and merge a branch back without sharing a working directory.
+Each worker gets its own Git worktree and native terminal. Arrange terminals in tabs and split panes, review changes, and merge a branch back without sharing a working directory.
 
 Built with **Tauri 2, Rust, Svelte 5, and ConPTY**. No Electron. No UI component kit.
 
@@ -14,6 +14,12 @@ Built with **Tauri 2, Rust, Svelte 5, and ConPTY**. No Electron. No UI component
 - Restart or stop workers, open their worktrees in VS Code, inspect diffs, and merge or remove worktrees with Git safety checks.
 - Recover active workers after an app restart using their saved omp sessions.
 - Configure the omp executable and default worker count. Keep your existing omp providers, authentication, and tools.
+- Use the Orca-style workspace shell, workspace search, tab menus, resizable panes, and Windows keyboard shortcuts.
+- Switch between dark, light, and system themes; tune terminal typography, cursor, and pane titles.
+
+![Minnow workspace](docs/parity/minnow-terminal-split-dark.png)
+
+The interface ports Orca's MIT-licensed design to Svelte. [UI_PARITY.md](UI_PARITY.md) maps the source components, supported interactions, screenshot comparisons, and deliberate backend differences.
 
 ## Build on Windows
 
@@ -79,7 +85,7 @@ The Tauri configuration lists the generated PNG, ICO, and ICNS assets. Windows e
 
 1. **Add a project.** Enter the path of a local Git repository with an initial commit and a checked-out branch. That branch becomes the project's merge target.
 2. **Create workers.** Choose a name and count. Worktrees live at `<repo>/.minnow/worktrees/<name>`; each worker has a dedicated session directory at `<repo>/.minnow/sessions/<id>`.
-3. **Work in parallel.** Use Grid to watch terminals or Tabs to focus one. Hidden terminals keep running but release their browser-side terminal resources.
+3. **Work in parallel.** Switch tabs with Alt+1…9 or Ctrl+PageUp/PageDown. Split right with Ctrl+Shift+D or down with Alt+Shift+D. Each new terminal creates another worker/worktree. Hidden terminals keep running but release their browser-side terminal resources.
 4. **Review and merge.** Commit changes in the worker's worktree, stop it, inspect the diff, then merge. Both trees must be clean and the base checkout must be on the captured target branch. Nothing is automatically staged or committed.
 5. **Remove finished workers.** Deletion refuses dirty worktrees, including ignored files, and branches not merged into the base. Session history is retained.
 
@@ -97,6 +103,8 @@ Closing Minnow terminates its owned worker process trees and records which worke
 - omp launches with `--motion none --spinner-interval 0 --no-title` to avoid animation and background title generation.
 
 Tauri still uses WebView2 renderer, GPU, and utility processes. Four omp workers also have their own memory costs; measuring only `minnow.exe` would hide most of the total.
+
+The four-worker RAM measurement has not been completed for this frontend. The <150 MiB target is a target, not a measured result. The UI parity work does not establish a memory or speed comparison with Orca.
 
 ### Reproduce a measurement
 
@@ -117,13 +125,17 @@ The script records the full descendant process tree, including WebView2 and omp.
 - The terminal ring is not durable scrollback. After truncation it may start partway through a screen update; after app restart, conversation recovery comes from omp's saved session instead. Hidden workers still execute.
 - A conflicting merge is reported and the merge started by Minnow is aborted; the worker branch is retained. Resolve the branch conflict with Git before retrying. No forced reset or worktree removal is used.
 - This release targets local Windows repositories and the native omp executable. It does not include remote hosts, WSL orchestration, multi-vendor agent launchers, or Orca's dispatch graph.
+- Orca's browser, native chat, mobile, remote hosts, integrations, and other service-backed pages are labelled shell-only placeholders. No Electron or Orca service runs inside Minnow.
+- Explorer has no file-tree backend; Source Control displays real bounded Git patches. Staging, history, provider data, and full-file editing are not implemented.
+- Project addition accepts a local repository path rather than opening a native folder picker. Workspace creation supports names and counts; provider issue/PR and arbitrary branch selection are unavailable.
+- Shortcut settings show Orca's Windows defaults, including excluded commands. Supported workspace/terminal bindings work; custom rebinding is unavailable.
 - Local workspace state and session files are not encrypted by Minnow. Provider credentials remain managed by omp.
 
 ## Architecture and reference
 
 [REFERENCE.md](REFERENCE.md) traces Orca's worktree, PTY, status, notification, session, and layout implementations at a pinned revision. It distinguishes Orca's existing performance mitigations from source-level costs; it does not invent an Orca RAM comparison.
 
-Minnow is an independent Rust/Svelte implementation. Orca's MIT attribution is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Minnow uses an independent Rust backend and a Svelte port of Orca's interface. Orca's MIT attribution and the bundled font/icon licenses are retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 

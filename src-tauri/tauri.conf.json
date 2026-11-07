@@ -12,6 +12,7 @@
   "app": {
     "windows": [{
       "title": "Minnow",
+      "decorations": false,
       "width": 1180,
       "height": 780,
       "minWidth": 520,

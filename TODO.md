@@ -1,38 +1,39 @@
 # Minnow milestones
 
-## 1. Reference and build setup
-- [x] Clone Orca into `_ref/orca`; record revision and license.
-- [x] Trace workers/worktrees, PTYs, status, notifications, resume, and layout in REFERENCE.md.
-- [x] Prepare Rust/MSVC, Svelte 5/Vite, and Tauri 2; commit the working baseline.
+## Reference and identity
+- [x] Clone Orca into `_ref/orca`; pin the revision and MIT license.
+- [x] Trace worktrees, PTYs, status, notifications, resume, and layout in REFERENCE.md.
+- [x] Use Minnow product/window name, `minnow` executable, and `com.minnow.app` identifier.
+- [x] Preserve the supplied icon, generate Tauri assets, and verify native/executable icons.
+- [x] Configure hanphanr1 authorship, the Minnow GitHub remote, and attribution.
 
-## 2. Native worker engine
-- [ ] SQLite projects, workers, and settings.
-- [ ] Git worktree creation, base diff, safe merge, and safe removal.
-- [ ] ConPTY per omp worker; bounded 2 MiB output ring; visible-only output subscription.
-- [ ] Running/idle/waiting/exited status, native notifications, restart, kill, editor launch.
-- [ ] Persist worker session paths and resume after application restart.
-- [ ] Exercise native lifecycle and commit.
+## Orca interface replacement (current priority)
+- [x] Study renderer components, spacing, typography, theme tokens, icons, states, and shortcuts.
+- [x] Map screens/components to source paths in UI_PARITY.md.
+- [x] Port Geist/Nerd fonts, light/dark tokens, Lucide geometry, and Windows chrome with license notices.
+- [x] Replace the custom layout with project/workspace navigation and the Orca-shaped landing shell.
+- [x] Implement real workspace creation, palette search/filtering, selection history, and sidebar presentation state.
+- [x] Implement tabs, names, colors, pins, reordering, split terminals, and split tab groups.
+- [x] Preserve visible-only terminals, native PTY leases, 2 MiB rings, and 64 KiB acknowledgement windows.
+- [x] Implement appearance/terminal preferences and searchable settings/shortcut navigation.
+- [x] Render actual Git patches and preserve real restart/stop/editor/merge/delete callbacks.
+- [x] Keep excluded service-backed features as labelled shell-only pages.
+- [x] Keep Rust and `src/api.ts` contracts unchanged; exclude the pre-existing ConPTY fix from UI commits.
+- [ ] Finish desktop interaction proof and source/Minnow screen comparisons in `docs/parity/`.
+- [ ] Commit the verified screen milestones and update the handoff with the resulting revisions.
 
-## 3. Workspace interface
-- [ ] Project sidebar, worker creation, grid and tabs.
-- [ ] Visible-only xterm instances with WebGL and disposal; keyboard focus and resize.
-- [ ] Worker actions, diff viewer, settings, empty/loading/error states.
-- [ ] Exercise real desktop surface and commit.
+## Existing native engine
+SQLite project/session/settings storage, worktrees, ConPTY, bounded output, status detection, notifications, worker actions, and saved-session relaunch remain the existing Rust implementation. UI work does not replace or re-certify that engine. `src-tauri/src/pty.rs` contains an earlier, separate startup-handshake fix.
 
-## 4. Minnow identity and supplied icons
-- [x] Product and window title `Minnow`, binary `minnow`, identifier `com.minnow.app`.
-- [x] Preserve the supplied original and normalize the 1408 × 1408 source to PNG without stretching.
-- [x] Generate the complete Tauri icon set with pnpm and configure the bundle icon paths.
-- [x] Verify that the embedded executable icon and the live Windows window icon match the generated icon pixel-for-pixel.
-- [x] Configure `hanphanr1` authorship, GitHub remote, repository description/topics, and MIT attribution.
+## Release evidence
+- [x] Run frontend type checks and production builds during integration.
+- [x] Run `cargo check --locked` after the chrome/config changes.
+- [ ] Build and exercise the final packaged frontend in the release executable.
+- [ ] Measure the full release process tree with four actual idle omp workers.
+- [ ] Record real RAM numbers and accounting scope in README.md.
 
-## 5. Release evidence
-- [ ] Cargo check, frontend checks/build, and release build with LTO and stripping.
-- [ ] End-to-end lifecycle, recovery, and git safety scenarios.
-- [ ] Measure the release application process tree with four actual idle omp workers.
-- [ ] README: PowerShell build/run steps, measured RAM with accounting scope, known limitations.
-- [ ] Final milestone commit.
+The user stopped the earlier backend/RAM verification and made interface parity the priority. The four-worker measurement remains unclaimed; the 150 MiB target is not a result.
 
 ## Design decisions
 
-ENERGY 1 / RHYTHM 1 / MOTION 1. The terminal is the primary surface; a compact project rail and worker tabs support switching without dashboard filler. Dark neutrals match the requested omp terminal workflow. A restrained amber focus accent identifies the active worker. Segoe UI uses Windows' installed interface font; Cascadia Mono/Consolas preserve terminal alignment without downloaded fonts. Flat panels and tight spacing reserve pixels for terminal output. The supplied Minnow fish artwork identifies the app in the sidebar, window, and taskbar; no animation is needed.
+ENERGY 1 / RHYTHM 1 / MOTION 1. Geometry, palette, spacing, fonts, icons, and interaction patterns follow the explicitly requested Orca reference. Minnow retains its supplied identity. Native terminal content and Git patches are real; excluded services are clearly unavailable. Settings and diff views load on demand. Narrow desktop windows reflow without clipping controls; the 1440px reference layout retains 280px/350px sidebars, 36px titlebar, and 24px status bar.
