@@ -611,7 +611,6 @@ impl Manager {
                     t.desired_running = false;
                 });
                 engine.publish(&terminal);
-                if !engine.is_shutting_down() && terminal.kind == KIND_AGENT { engine.toast(&terminal.name, "Worker exited"); }
             }
             *session.completed.0.lock().unwrap() = true;
             session.completed.1.notify_all();
@@ -627,11 +626,12 @@ impl Manager {
         });
         let Some(_) = changed else { return; };
         self.publish(&terminal);
-        if status == STATUS_IDLE && terminal.kind == KIND_AGENT && !self.is_shutting_down() { self.toast(&terminal.name, "Worker is idle"); }
     }
 
-    fn toast(&self, name: &str, message: &str) {
-        let title = format!("Minnow: {name}");
+    /// Shows a system notification. Which transitions notify is the UI's decision
+    /// (Settings > Notifications), so the engine itself never raises one.
+    pub fn notify(&self, title: &str, message: &str) {
+        let title = title.to_owned();
         let message = message.to_owned();
         thread::spawn(move || {
             if let Err(error) = notify_rust::Notification::new().summary(&title).body(&message).appname("Minnow").show() {
@@ -643,9 +643,14 @@ impl Manager {
     /// Stops one terminal's process tree and waits for its exit to be recorded.
     fn stop(&self, session: &Arc<Session>, explicit: bool) -> Result<(), String> {
         if explicit {
-            let mut terminal = session.terminal.lock().unwrap();
-            terminal.desired_running = false;
-            self.store.save_terminal(&terminal)?;
+            let snapshot = {
+                let mut terminal = session.terminal.lock().unwrap();
+                terminal.desired_running = false;
+                self.store.save_terminal(&terminal)?;
+                terminal.clone()
+            };
+            // Publishing the intent first lets the UI tell an explicit stop from a crash.
+            self.publish(&snapshot);
         }
         let was_alive = session.alive.load(Ordering::Acquire);
         if was_alive {

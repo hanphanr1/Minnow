@@ -10,6 +10,8 @@
   import RightSidebar from './ui/RightSidebar.svelte';
   import ProjectAdmission from './ui/ProjectAdmission.svelte';
   import QuickOpen from './ui/QuickOpen.svelte';
+  import ActivityPage from './ui/ActivityPage.svelte';
+  import { activity, observeTerminal, type ActivityEvent } from './ui/activity.svelte';
   import WindowControls from './ui/WindowControls.svelte';
   import { loadPreferences, preferenceKey, type UiPreferences } from './ui/preferences';
   import type { Project, Settings, TerminalKind, TerminalSession, Worker } from './types';
@@ -41,7 +43,8 @@
   let quickOpenOpen = $state(false);
   let confirmDialog = $state<HTMLDialogElement>();
   let confirm = $state<{action:'merge'|'delete';worker:Worker;busy:boolean;error:string|null}|null>(null);
-  type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void };
+  type SettingsViewProps = { settings: Settings; preferences: UiPreferences; onSave: (value: Settings) => Promise<void>; onPreferences: (value: UiPreferences) => void; onBack: () => void; initialSection?: string; projects?: Project[] };
+  let settingsSection = $state<string|undefined>(undefined);
   let SettingsView = $state<Component<SettingsViewProps>|null>(null);
   let settingsLoading = $state(false);
   let settingsError = $state<string|null>(null);
@@ -75,7 +78,9 @@
     workers = exists ? workers.map(w => w.id === value.id ? value : w) : [...workers,value];
   }
   function applyTerminal(value:TerminalSession) {
-    const exists = terminals.some(t => t.id === value.id);
+    const previous = terminals.find(t => t.id === value.id);
+    observeTerminal(previous, value, workers.find(w => w.id === value.worker_id));
+    const exists = previous !== undefined;
     terminals = exists ? terminals.map(t => t.id === value.id ? value : t) : [...terminals,value];
     return value;
   }
@@ -175,6 +180,13 @@
     await tick();
     workspace?.openDocument(document);
   }
+  async function openActivity(event:ActivityEvent) {
+    if (!workers.some(w => w.id === event.workerId)) return;
+    await select(event.projectId,event.workerId);
+    await tick();
+    workspace?.activateTerminal(event.terminalId);
+  }
+  const unreadActivity = $derived(activity.events.filter(event => !event.read).length);
   async function openFile(path:string,line?:number) { await openDocument({kind:'file',path,line}); }
   async function openDiff(target:Worker,path?:string,staged = false) {
     if (target.id !== activeWorkerId) { await select(target.project_id,target.id); }
@@ -187,7 +199,8 @@
     catch (error) { settingsError = errorMessage(error); }
     finally { settingsLoading = false; }
   }
-  async function openSettings() {
+  async function openSettings(section?:string) {
+    settingsSection = section;
     if (!(await leaveFile())) return;
     page = 'settings';
     void loadSettings();
@@ -221,7 +234,9 @@
     catch (error) { notify(`Could not save appearance: ${errorMessage(error)}`,true); }
   }
   function setPanel(value:string) { panel = value; rightVisible = true; }
-  async function feature(name:string) { if (!(await leaveFile())) return; page = name; }
+  // Orca entries that are real settings sections open there instead of a placeholder page.
+  const SETTINGS_FEATURES: Record<string,string> = { 'Quick Commands': 'quick-commands', 'Notifications': 'notifications', 'Session History': 'session-history', 'Stats': 'stats' };
+  async function feature(name:string) { if (SETTINGS_FEATURES[name]) { await openSettings(SETTINGS_FEATURES[name]); return; } if (!(await leaveFile())) return; page = name; }
   let viewportWidth = $state(1440);
   const shellViewport = $derived(Math.max(320, Number.isFinite(viewportWidth) ? viewportWidth : 1440));
   const compactShell = $derived(shellViewport < 960);
@@ -345,7 +360,7 @@
 <div class="app-layout">
   {#if page === 'settings'}
     {#if SettingsView}
-      <SettingsView {settings} {preferences} onSave={async value => { settings = await saveSettings(value); }} onPreferences={changePreferences} onBack={closeSettings} />
+      <SettingsView {settings} {preferences} initialSection={settingsSection} {projects} onSave={async value => { settings = await saveSettings(value); }} onPreferences={changePreferences} onBack={closeSettings} />
     {:else}
       <div class="flex h-full min-h-0 flex-1 flex-col bg-background">
         <div class="titlebar shrink-0" data-tauri-drag-region>
@@ -371,7 +386,7 @@
     <div class="app-body">
       {#if effectiveSidebar}
         <aside class="shell-sidebar" style:width={`${shellWidths.left}px`}>
-          <Sidebar bind:this={sidebar} {projects} {workers} {selectedProjectId} {activeWorkerId} activeView={page} onSelect={select} onCreate={() => { createOpen = true; }} onAddProject={() => { projectOpen = true; }} onSearch={() => { paletteOpen = true; }} onSettings={openSettings} onToggle={() => { sidebarVisible = false; }} onBack={() => navigate(-1)} onForward={() => navigate(1)} canBack={historyIndex > 0} canForward={historyIndex < history.length-1} onFeature={feature} onWorkerAction={(kind,value) => { void action(kind,value); }} />
+          <Sidebar bind:this={sidebar} {projects} {workers} {selectedProjectId} {activeWorkerId} activeView={page} onSelect={select} onCreate={() => { createOpen = true; }} onAddProject={() => { projectOpen = true; }} onSearch={() => { paletteOpen = true; }} onSettings={() => { void openSettings(); }} onToggle={() => { sidebarVisible = false; }} onBack={() => navigate(-1)} onForward={() => navigate(1)} canBack={historyIndex > 0} canForward={historyIndex < history.length-1} onFeature={feature} onWorkerAction={(kind,value) => { void action(kind,value); }} />
           <div role="slider" aria-label="Resize workspace sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="500" aria-valuenow={shellWidths.left} tabindex="0" class="sidebar-resizer right-edge" onpointerdown={event => resize(event,'left')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,sidebarWidth:Math.max(220,Math.min(500,shellWidths.left+(event.key === 'ArrowLeft' ? -10 : 10)))}); } }}></div>
         </aside>
       {/if}
@@ -387,6 +402,7 @@
         <div class="relative flex min-h-0 flex-1 flex-col">
           {#if booting}<div class="flex h-full items-center justify-center text-sm text-muted-foreground" role="status">Loading workspace…</div>
           {:else if bootError}<div class="m-auto max-w-lg space-y-3 p-6" role="alert"><h1 class="text-lg font-semibold">Workspace failed to load</h1><p class="mn-error">{bootError}</p><button class="mn-button" onclick={start}>Retry</button></div>
+          {:else if page === 'Activity'}<ActivityPage {workers} onOpen={openActivity} onSettings={() => { void openSettings('notifications'); }}/>
           {:else if page !== 'terminal'}<div class="flex min-h-0 flex-1 flex-col"><header class="border-b border-border px-6 py-5"><h1 class="text-xl font-semibold">{page}</h1></header><div class="m-auto max-w-lg space-y-3 p-8 text-center"><h2 class="text-lg font-medium">{page} is unavailable in this build</h2><p class="text-sm text-muted-foreground">This Orca shell entry is reserved. Minnow does not start the associated service.</p><button class="mn-button" onclick={() => { page = 'terminal'; }}>Back to workspace</button></div></div>
           {:else if project && worker}
             <Workspace bind:this={workspace} {project} {worker} terminals={workerTerminals} {preferences} onActivateTerminal={id => { activeTerminalId = id || null; }} onCreateTerminal={createWorkspaceTerminal} onRestartTerminal={async id => applyTerminal(await restartTerminal(id))} onStopTerminal={async id => applyTerminal(await killTerminal(id))} onCloseTerminal={async id => applyTerminal(await closeTerminal(id))} onStopWorker={async target => { applyWorker(await killWorker(target.id)); }} onAction={(kind,value) => { void action(kind,value); }} onFeature={feature} onError={message => notify(message,true)} onToggleSidebar={toggleSidebar} onToggleRightSidebar={toggleRightSidebar} sidebarVisible={effectiveSidebar} rightSidebarVisible={effectiveRight}/>
@@ -396,7 +412,7 @@
       {#if effectiveRight}<aside class="shell-right" style:width={`${shellWidths.right}px`}><RightSidebar {worker} workers={projectWorkers} {panel} onPanel={setPanel} onRefresh={() => {}} onOpenDiff={(path,staged) => { if (worker) void openDiff(worker,path,staged); }} onOpenFile={(path,line) => { void openFile(path,line); }} onOpenEditor={() => { if (worker) void action('editor',worker); }} onSelect={id => { if (project) void select(project.id,id); }} onClose={() => { rightVisible = false; }}/><div role="slider" aria-label="Resize right sidebar" aria-orientation="horizontal" aria-valuemin="220" aria-valuemax="600" aria-valuenow={shellWidths.right} tabindex="0" class="sidebar-resizer left-edge" onpointerdown={event => resize(event,'right')} onkeydown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); changePreferences({...preferences,rightSidebarWidth:Math.max(220,Math.min(600,shellWidths.right+(event.key === 'ArrowLeft' ? 10 : -10)))}); } }}></div></aside>{/if}
     </div>
   {/if}
-  <footer class="mn-statusbar"><div class="flex min-w-0 items-center"><button aria-label="Notifications" onclick={() => feature('Activity')}><Bell size={12}/></button>{#if worker}<span class="truncate">{worker.status}</span><button onclick={() => { void action('diff',worker); }}><GitBranch size={12}/><span class="max-w-56 truncate">{worker.branch}</span></button>{/if}</div><div class="flex items-center"><button onclick={() => feature('Plugins')} title="Plugins"><Plug size={12}/><span>Off</span></button><button onclick={openSettings}><Monitor size={12}/><span>{workers.filter(w => w.pid !== null).length} workers</span></button><button onclick={() => feature('Remote Hosts')}>0 hosts</button></div></footer>
+  <footer class="mn-statusbar"><div class="flex min-w-0 items-center"><button aria-label="Activity" title="Activity" onclick={() => feature('Activity')}><Bell size={12}/>{#if unreadActivity > 0}<span class="tabular-nums">{unreadActivity > 99 ? '99+' : unreadActivity}</span>{/if}</button>{#if worker}<span class="truncate">{worker.status}</span><button onclick={() => { void action('diff',worker); }}><GitBranch size={12}/><span class="max-w-56 truncate">{worker.branch}</span></button>{/if}</div><div class="flex items-center"><button onclick={() => feature('Plugins')} title="Plugins"><Plug size={12}/><span>Off</span></button><button onclick={() => { void openSettings(); }}><Monitor size={12}/><span>{workers.filter(w => w.pid !== null).length} workers</span></button><button onclick={() => feature('Remote Hosts')}>0 hosts</button></div></footer>
 </div>
 <WindowControls onError={message => notify(message,true)} onBeforeClose={leaveFile}/>
 {#if createOpen}<CreateWorkspace {projects} {selectedProjectId} defaultCount={settings.default_worker_count} onCreate={create} onAddProject={() => { createOpen = false; projectOpen = true; }} onClose={() => { createOpen = false; }}/>{/if}

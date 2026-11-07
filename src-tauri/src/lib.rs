@@ -169,6 +169,11 @@ async fn watch_workspace(
 }
 
 #[tauri::command]
+fn show_notification(engine: State<'_, Engine>, title: String, body: String) {
+    engine.notify(&title, &body);
+}
+
+#[tauri::command]
 async fn bootstrap(engine: State<'_, Engine>) -> Result<Snapshot, String> {
     let engine = engine.inner().clone();
     blocking(move || engine.snapshot()).await
@@ -312,7 +317,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bootstrap, add_project, create_workers, restart_worker, kill_worker,
+            bootstrap, show_notification, add_project, create_workers, restart_worker, kill_worker,
             delete_worker, diff_worker, merge_worker, open_editor, save_settings,
             create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,

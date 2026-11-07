@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, setContext, tick, untrack } from 'svelte';
   import {
+    Bot,
     ChevronLeft,
     ChevronRight,
     Clipboard,
@@ -30,7 +31,8 @@
     X,
   } from 'lucide-svelte';
   import type { Project, TerminalKind, TerminalSession, Worker } from '../types';
-  import { errorMessage } from '../api';
+  import { errorMessage, writeTerminal } from '../api';
+  import { quickCommandsFor, type QuickCommand } from './quick-commands.svelte';
   import { workspacePathMovedEvent, type PathMoved } from '../workspace-api';
   import type { UiPreferences } from './preferences';
   import PaneTree from './PaneTree.svelte';
@@ -937,11 +939,44 @@
     ], 288);
   }
 
+  /** Types a saved command into the focused terminal, or starts an agent terminal with its prompt. */
+  async function runQuickCommand(command: QuickCommand): Promise<void> {
+    try {
+      if (command.action === 'agent-prompt') {
+        const created = await onCreateTerminal('agent', null);
+        await tick();
+        const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
+        const tabId = group ? addTerminalTab(snapshot, created.id, group.id) : null;
+        if (tabId) activateTabInternal(tabId, true);
+        // ConPTY buffers input until omp reads it, so the prompt is not lost while it starts.
+        await writeTerminal(created.id, `${command.prompt}\r`);
+        return;
+      }
+      let target = activeTerminal && !activeTerminal.closed && activeTerminal.status !== 'exited' ? activeTerminal.id : null;
+      if (!target) {
+        const created = await onCreateTerminal('shell', null);
+        await tick();
+        const group = groupById(snapshot, snapshot.activeGroupId) ?? snapshot.groups[0];
+        const tabId = group ? addTerminalTab(snapshot, created.id, group.id) : null;
+        if (tabId) activateTabInternal(tabId, true);
+        target = created.id;
+      }
+      await writeTerminal(target, command.appendEnter ? `${command.command}\r` : command.command);
+      restoreTerminalFocus();
+    } catch (error) {
+      onError(`${command.label}: ${errorMessage(error)}`);
+    }
+  }
+
   function openQuickCommandsMenu(anchor: DOMRect): void {
+    const commands = quickCommandsFor(project.id);
     openMenuAt(anchor.left, anchor.bottom + 6, [
-      menuItem('No quick commands configured', undefined, undefined, () => {}, {
-        disabled: true,
-      }),
+      ...(commands.length === 0
+        ? [menuItem('No quick commands configured', undefined, undefined, () => {}, { disabled: true })]
+        : commands.map((command) =>
+            menuItem(command.label, command.action === 'agent-prompt' ? Bot : SquareTerminal, undefined, () => void runQuickCommand(command)),
+          )),
+      separator(),
       menuItem('Manage Quick Commands', undefined, undefined, () => onFeature('Quick Commands')),
     ], 288);
   }

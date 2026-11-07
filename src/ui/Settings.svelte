@@ -21,6 +21,9 @@
   import GeneralPane from './settings/GeneralPane.svelte';
   import ShortcutsPane from './settings/ShortcutsPane.svelte';
   import UnavailablePane from './settings/UnavailablePane.svelte';
+  import QuickCommandsPane from './settings/QuickCommandsPane.svelte';
+  import NotificationsPane from './settings/NotificationsPane.svelte';
+  import type { Project } from '../types';
 
   let {
     settings,
@@ -28,7 +31,8 @@
     onSave,
     onPreferences,
     onBack,
-    initialSection
+    initialSection,
+    projects = []
   }: {
     settings: AppSettings;
     preferences: UiPreferences;
@@ -36,6 +40,7 @@
     onPreferences: (preferences: UiPreferences) => void;
     onBack: () => void;
     initialSection?: string;
+    projects?: Project[];
   } = $props();
 
   // Deep links only choose the opening section; later navigation owns activeSectionId.
@@ -172,6 +177,10 @@
                 <TerminalPane {preferences} {onPreferences} {query} />
               {:else if section.id === 'general'}
                 <GeneralPane {settings} {onSave} {query} />
+              {:else if section.id === 'notifications'}
+                <NotificationsPane {query} />
+              {:else if section.id === 'quick-commands'}
+                <QuickCommandsPane {projects} {query} />
               {:else if section.id === 'shortcuts'}
                 <ShortcutsPane {query} />
               {:else}

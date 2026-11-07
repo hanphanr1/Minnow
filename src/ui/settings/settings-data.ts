@@ -299,7 +299,7 @@ export const NAV_SECTIONS: NavSection[] = [
     description: 'Saved terminal commands, scoped globally or per project.',
     icon: Play,
     keywords: ['quick commands', 'saved commands', 'terminal commands'],
-    implemented: false,
+    implemented: true,
     includes: ['Global and project command scopes', 'Command editing and ordering', 'Command arguments']
   },
   {
@@ -385,7 +385,7 @@ export const NAV_SECTIONS: NavSection[] = [
     description: 'Native desktop notifications for agent and terminal events.',
     icon: Bell,
     keywords: ['notifications', 'desktop alerts', 'sounds', 'terminal events'],
-    implemented: false,
+    implemented: true,
     includes: ['Agent and terminal notification sources', 'Notification sounds', 'Pending notification saves']
   },
   {
