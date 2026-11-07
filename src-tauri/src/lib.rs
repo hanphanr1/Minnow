@@ -4,6 +4,7 @@ mod process_tree;
 mod pty;
 mod storage;
 mod projects;
+mod ports;
 mod sessions;
 mod workspace;
 mod workspace_watch;
@@ -193,6 +194,28 @@ async fn search_agent_sessions(engine: State<'_, Engine>, query: String) -> Resu
 }
 
 #[tauri::command]
+async fn workspace_ports(engine: State<'_, Engine>, worker_id: String) -> Result<Vec<ports::ListeningPort>, String> {
+    let engine = engine.inner().clone();
+    blocking(move || engine.worker_ports(&worker_id)).await
+}
+
+/// Opens a local web address in the default browser. Only loopback http(s) URLs.
+#[tauri::command]
+fn open_local_url(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let allowed = ["http://localhost:", "http://127.0.0.1:", "https://localhost:", "https://127.0.0.1:", "http://[::1]:"];
+    if !allowed.iter().any(|prefix| lower.starts_with(prefix)) || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err("Only local http addresses can be opened".into());
+    }
+    let mut command = std::process::Command::new("rundll32.exe");
+    command.args(["url.dll,FileProtocolHandler", &url]);
+    command
+        .spawn()
+        .map(|mut child| { std::thread::spawn(move || { let _ = child.wait(); }); })
+        .map_err(|e| format!("cannot open the browser: {e}"))
+}
+
+#[tauri::command]
 async fn bootstrap(engine: State<'_, Engine>) -> Result<Snapshot, String> {
     let engine = engine.inner().clone();
     blocking(move || engine.snapshot()).await
@@ -336,7 +359,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bootstrap, show_notification, list_agent_sessions, read_agent_session, search_agent_sessions, add_project, create_workers, restart_worker, kill_worker,
+            bootstrap, show_notification, workspace_ports, open_local_url, list_agent_sessions, read_agent_session, search_agent_sessions, add_project, create_workers, restart_worker, kill_worker,
             delete_worker, diff_worker, merge_worker, open_editor, save_settings,
             create_terminal, restart_terminal, kill_terminal, close_terminal, terminal_cwd,
             attach_terminal, detach_terminal, resize_terminal, write_terminal, ack_terminal,

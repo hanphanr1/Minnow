@@ -35,7 +35,7 @@
   import { workspaceEventDetail } from './workspace-events';
   import { errorMessage } from '../api';
 
-  type SectionId = 'staged' | 'unstaged' | 'untracked';
+  type SectionId = 'conflicts' | 'staged' | 'unstaged' | 'untracked';
 
   interface StatusSection {
     id: SectionId;
@@ -47,11 +47,14 @@
   let {
     worker,
     onOpenDiff,
+    onOpenFile,
     onChanged,
     onNotify
   }: {
     worker: Worker;
     onOpenDiff: (path?: string, staged?: boolean) => void;
+    /** Conflicted files open in the editor so their markers can be resolved. */
+    onOpenFile?: (path: string) => void;
     onChanged: () => void;
     onNotify: (message: string, error?: boolean) => void;
   } = $props();
@@ -60,6 +63,8 @@
 
   let status = $state<GitStatus | null>(null);
   let history = $state<GitCommit[] | null>(null);
+  // Grows by a page each time the list is exhausted, up to the native 500-commit bound.
+  let historyLimit = $state(30);
   let statusLoading = $state(false);
   let historyLoading = $state(false);
   let statusError = $state<string | null>(null);
@@ -96,18 +101,26 @@
       !query ||
       entry.path.toLowerCase().includes(query) ||
       (entry.old_path?.toLowerCase().includes(query) ?? false);
+    // Unmerged paths (status U) form Orca's Merge Changes section; they are not ordinary changes.
+    const conflicted = new Set(current.unstaged.filter((entry) => entry.status === 'U').map((entry) => entry.path));
     return [
+      {
+        id: 'conflicts' as const,
+        label: 'Merge Changes',
+        staged: false,
+        entries: current.unstaged.filter((entry) => conflicted.has(entry.path)).filter(matches)
+      },
       {
         id: 'staged' as const,
         label: 'Staged Changes',
         staged: true,
-        entries: current.staged.filter(matches)
+        entries: current.staged.filter((entry) => !conflicted.has(entry.path)).filter(matches)
       },
       {
         id: 'unstaged' as const,
         label: 'Changes',
         staged: false,
-        entries: current.unstaged.filter(matches)
+        entries: current.unstaged.filter((entry) => !conflicted.has(entry.path)).filter(matches)
       },
       {
         id: 'untracked' as const,
@@ -120,8 +133,11 @@
 
   function rawEntries(id: SectionId): GitFileChange[] {
     if (!status) return [];
-    if (id === 'staged') return status.staged;
-    if (id === 'unstaged') return status.unstaged;
+    const conflicted = (entry: GitFileChange): boolean => entry.status === 'U';
+    const conflictPaths = new Set(status.unstaged.filter(conflicted).map((entry) => entry.path));
+    if (id === 'conflicts') return status.unstaged.filter(conflicted);
+    if (id === 'staged') return status.staged.filter((entry) => !conflictPaths.has(entry.path));
+    if (id === 'unstaged') return status.unstaged.filter((entry) => !conflicted(entry));
     return status.untracked;
   }
 
@@ -133,6 +149,10 @@
   }
 
   function openEntry(entry: GitFileChange, staged: boolean): void {
+    if (entry.status === 'U' && onOpenFile) {
+      onOpenFile(entry.path);
+      return;
+    }
     onOpenDiff(entry.path, staged);
   }
 
@@ -194,7 +214,7 @@
     const sequence = ++historySeq;
     historyLoading = true;
     try {
-      const next = await getWorkspaceHistory(requestedWorkerId, 30);
+      const next = await getWorkspaceHistory(requestedWorkerId, historyLimit);
       if (
         sequence !== historySeq ||
         generationAtRequest !== generation ||
@@ -905,6 +925,16 @@
               </div>
             </div>
           {/each}
+          {#if history.length >= historyLimit && historyLimit < 500}
+            <button
+              type="button"
+              class="mx-3 my-2 h-6 rounded-md border border-border px-2 text-[11px] text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+              disabled={historyLoading}
+              onclick={() => { historyLimit = Math.min(500, historyLimit + 30); void loadHistory(workerId, generation); }}
+            >
+              {historyLoading ? 'Loading…' : 'Load more commits'}
+            </button>
+          {/if}
         </div>
       {/if}
     {/if}

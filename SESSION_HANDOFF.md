@@ -53,6 +53,13 @@ All exercised on the isolated debug desktop (`.smoke/terminal-state`, CDP 9226, 
 
 Known gaps of these slices: Explorer has no duplicate, drag-move/import or multi-select; a dirty editor is not preserved across a rename of its file; closed document tabs cannot be reopened; clipboard reads from automation trigger a WebView2 permission prompt (do not use `navigator.clipboard.readText()` in smoke scripts).
 
+## Pass 3 (Quick Commands to Ports)
+
+- `56bf275` Quick Commands (localStorage `minnow.quickCommands.v1`, Settings pane, workspace Command menu); Notifications prefs + Activity page (`src/ui/activity.svelte.ts`, native `show_notification`; the engine no longer toasts by itself and publishes explicit stops). Smoked natively.
+- `007dd9d` `src-tauri/src/sessions.rs`: list/read/search omp transcripts of agent terminals; Settings Agent Session Search and Stats & Usage. Smoked with a fixture transcript in the primary agent's session dir.
+- Last commit: `src-tauri/src/ports.rs` + `ProcessTree::pids` (job object PID list) + `workspace_ports`/`open_local_url`; Ports right-sidebar panel; Source Control history Load more (native cap 500) and Merge Changes section. Checks/build/47 tests pass; NOT yet exercised on the desktop.
+- `FEATURES.md` is the authoritative per-feature status table.
+
 ## Implemented frontend
 
 - Exact source theme tokens, Geist/Nerd fonts, Lucide geometry, 280px/350px reference sidebars, 36px Windows chrome, and 24px status bar.

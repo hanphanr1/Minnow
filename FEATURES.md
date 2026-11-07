@@ -13,9 +13,9 @@ Inventory of every feature area in the pinned Orca source (`_ref/orca/src/render
 | Projects, worktree creation, palette, history, pins/groups (`sidebar`, `new-workspace`, `worktree-creation`, `worktree-jump`) | Done |
 | Many terminals per worktree, splits, tab groups, drag/drop, pins, colours, reopen (`tab-bar`, `tab-group`, `terminal-pane`) | Done |
 | Split cwd inheritance (OSC 7) | Done |
-| Terminal quick commands (`terminal-quick-commands`, settings `quick-commands`) | Done (this pass) |
-| Floating terminal (`floating-terminal`) | Done (this pass) |
-| Workspace cleanup of merged worktrees (`workspace-cleanup`) | Done (this pass) |
+| Terminal quick commands (`terminal-quick-commands`, settings `quick-commands`) | Done  |
+| Floating terminal (`floating-terminal`) | Local, queued |
+| Workspace cleanup of merged worktrees (`workspace-cleanup`) | Local, queued (reuse `git::delete_worktree` safety checks) |
 | Workspace emoji / board / dashboard (`workspace-emoji`, `dashboard`, `dashboard-popout`) | Local, partly (board/dashboard queued) |
 | Floating workspaces (`floating-workspaces`) | Local, queued |
 | Sparse checkout, WSL drives/hosts (`sparse`, `wsl-*`) | External (WSL/sparse repos not present) |
@@ -31,7 +31,7 @@ Inventory of every feature area in the pinned Orca source (`_ref/orca/src/render
 | Editor tabs inside groups, dirty guards (`editor`) | Done |
 | Content search | Done |
 | Source control: status, stage/unstage, commit, history, discard | Done |
-| Source control: history pagination, conflict section | Done (this pass) |
+| Source control: history pagination (Load more, up to 500), Merge Changes section (conflicts open in editor) | Implemented; checks/build/tests pass, not yet exercised natively |
 | Diff comments (`diff-comments`) | Local, queued |
 | Markdown preview tabs | Local, queued |
 | GitHub / GitLab items, PR page, checks, hosted review (`github*`, `gitlab*`, `pull-request-page`, `checks-panel`) | External (provider auth) |
@@ -42,10 +42,10 @@ Inventory of every feature area in the pinned Orca source (`_ref/orca/src/render
 |---|---|
 | omp agent terminals, status detection, resume | Done |
 | Agent session history and search (`settings/session-history`, `agent-session-continuation`) | Done (this pass, local omp session files) |
-| Activity / notifications history and preferences (`activity`, `notifications`) | Done (this pass) |
+| Activity / notifications history and preferences (`activity`, `notifications`) | Done  |
 | Usage stats (`stats`) | Done (this pass, local counts only) |
 | Automations (`automations`) | Local, queued |
-| Ports panel (`ports`) | Done (this pass, local listening ports) |
+| Ports panel (`ports`) | Implemented (job PIDs + netstat, open in browser); tests pass, not yet exercised natively |
 | Native chat, provider accounts, orchestration crew, managed runtime (`native-chat`, `provider-accounts`, `orchestration-crew`, `managed-runtime`) | External |
 | Skills, artifacts, plugins (`skills`, `artifacts`, `plugins`) | External runtimes; local skill listing queued |
 | Tasks / integrations (`task-page`, `integrations`, `github-project`) | External |
@@ -56,6 +56,7 @@ Inventory of every feature area in the pinned Orca source (`_ref/orca/src/render
 | Section | Status |
 |---|---|
 | Appearance, Terminal, General, Shortcuts (view) | Done |
-| Quick Commands, Notifications, Session History, Stats, Git | Done (this pass) |
-| Editable shortcuts with conflict detection | Done (this pass) |
+| Quick Commands, Notifications, Agent Session Search, Stats & Usage | Done |
+| Git settings section | Local, queued |
+| Editable shortcuts with conflict detection (one runtime registry) | Local, queued |
 | Agents, Accounts, Orchestration, Computer Use, Voice, Integrations, Mobile, Artifacts, Skills, Tasks, Browser, Emulator, Chat, SSH, Servers, Privacy, Plugins | External / labelled unavailable |

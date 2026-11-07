@@ -5,6 +5,7 @@
     Files,
     GitBranch,
     ListChecks,
+    Network,
     PanelRight,
     X
   } from 'lucide-svelte';
@@ -12,6 +13,7 @@
   import { announceWorkspaceChange } from '../workspace-api';
   import ExplorerPane from './ExplorerPane.svelte';
   import SourceControlPane from './SourceControlPane.svelte';
+  import PortsPane from './PortsPane.svelte';
 
   type IconComponent = typeof Files;
 
@@ -26,7 +28,8 @@
     { id: 'explorer', title: 'Explorer', icon: Files, shortcut: 'Ctrl+Shift+E' },
     { id: 'agents', title: 'Agents', icon: null, shortcut: '' },
     { id: 'source-control', title: 'Source Control', icon: GitBranch, shortcut: 'Ctrl+Shift+G' },
-    { id: 'checks', title: 'Checks', icon: ListChecks, shortcut: '' }
+    { id: 'checks', title: 'Checks', icon: ListChecks, shortcut: '' },
+    { id: 'ports', title: 'Ports', icon: Network, shortcut: '' }
   ];
 
   const STATUS_DOT_CLASS: Record<WorkerStatus, string> = {
@@ -173,6 +176,7 @@
         <SourceControlPane
           {worker}
           {onOpenDiff}
+          onOpenFile={(path) => onOpenFile(path)}
           onChanged={handleWorkspaceChanged}
           onNotify={notifyLocal}
         />
@@ -228,6 +232,12 @@
           </div>
         {/if}
       </div>
+    {:else if activePanel === 'ports'}
+      {#if worker}
+        <PortsPane {worker} />
+      {:else}
+        <div class="flex flex-1 items-center justify-center px-4 text-center text-xs text-muted-foreground">Select a workspace to see its ports</div>
+      {/if}
     {:else if activePanel === 'checks'}
       <div class="flex min-h-0 flex-1 flex-col items-center justify-center px-4 text-center">
         <ListChecks size={18} class="text-muted-foreground/60" aria-hidden="true" />

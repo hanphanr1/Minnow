@@ -757,6 +757,21 @@ impl Manager {
         Ok(self.session(id)?.terminal.lock().unwrap().current_cwd.clone().unwrap_or_default())
     }
 
+    /// Listening TCP ports owned by any live terminal (or its descendants) of a worktree.
+    pub fn worker_ports(&self, worker_id: &str) -> Result<Vec<crate::ports::ListeningPort>, String> {
+        self.worker(worker_id)?;
+        let mut owners = HashMap::new();
+        for session in self.ordered_sessions(Some(worker_id)) {
+            if !session.alive.load(Ordering::Acquire) { continue; }
+            let terminal = session.terminal();
+            if let Some(io) = session.io.lock().unwrap().as_ref() {
+                for pid in io.tree.pids() { owners.insert(pid, (terminal.id.clone(), terminal.name.clone())); }
+            }
+            if let Some(pid) = terminal.pid { owners.entry(pid).or_insert((terminal.id.clone(), terminal.name.clone())); }
+        }
+        crate::ports::listening(&owners)
+    }
+
     /// Session directories of every agent terminal (closed ones too: their history stays).
     pub fn session_sources(&self) -> Vec<crate::sessions::SessionSource> {
         self.ordered_sessions(None).iter().map(|session| session.terminal())

@@ -4,7 +4,7 @@ mod windows {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
-            JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE},
+            JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE},
             Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
         },
     };
@@ -34,6 +34,25 @@ mod windows {
             }
         }
 
+        /// Every process currently in the job: the terminal and all its descendants.
+        pub fn pids(&self) -> Vec<u32> {
+            // JOBOBJECT_BASIC_PROCESS_ID_LIST: two u32 counters, then usize ids.
+            const CAPACITY: usize = 1024;
+            let mut buffer = vec![0usize; 1 + CAPACITY];
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr() as *mut _,
+                    (buffer.len() * size_of::<usize>()) as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 { return Vec::new(); }
+            let listed = unsafe { *(buffer.as_ptr() as *const u32).add(1) } as usize;
+            buffer[1..1 + listed.min(CAPACITY)].iter().map(|pid| *pid as u32).collect()
+        }
+
         pub fn kill(&self) -> Result<(), String> {
             if unsafe { TerminateJobObject(self.0, 1) } == 0 {
                 Err(io::Error::last_os_error().to_string())
@@ -55,4 +74,5 @@ pub struct ProcessTree;
 #[cfg(not(windows))]
 impl ProcessTree {
     pub fn attach(_: u32) -> Result<Self, String> { Ok(Self) }
+    pub fn pids(&self) -> Vec<u32> { Vec::new() }
 }

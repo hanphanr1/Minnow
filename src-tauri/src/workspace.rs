@@ -26,7 +26,7 @@ const MAX_SEARCH_CANDIDATES: usize = 20_000;
 const MAX_SEARCH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 400;
 const DEFAULT_HISTORY_LIMIT: usize = 30;
-const MAX_HISTORY_LIMIT: usize = 100;
+const MAX_HISTORY_LIMIT: usize = 500;
 
 /// Serializes revision-checked saves and Git mutations originating in the app.
 static MUTATION_LOCK: Mutex<()> = Mutex::new(());
